@@ -356,13 +356,10 @@ class _InkCanvasState extends State<InkCanvas> {
     widget.onStrokesChanged([]);
   }
 
-  Offset _toCanvasPos(Offset globalPos) {
-    final box = context.findRenderObject() as RenderBox?;
-    if (box == null) return globalPos;
-    final local = box.globalToLocal(globalPos);
+  Offset _toCanvasPos(Offset localPos) {
     return Offset(
-      (local.dx - _offset.dx) / _scale,
-      (local.dy - _offset.dy) / _scale,
+      (localPos.dx - _offset.dx) / _scale,
+      (localPos.dy - _offset.dy) / _scale,
     );
   }
 
@@ -393,15 +390,17 @@ class _InkCanvasState extends State<InkCanvas> {
             child: Listener(
               onPointerDown: (e) {
                 if (e.kind == PointerDeviceKind.stylus ||
+                    e.kind == PointerDeviceKind.invertedStylus ||
                     e.kind == PointerDeviceKind.mouse ||
                     e.kind == PointerDeviceKind.touch) {
                   final pressure = e.pressure > 0 ? e.pressure : 0.5;
-                  _startStroke(_toCanvasPos(e.position), pressure);
+                  _startStroke(_toCanvasPos(e.localPosition), pressure);
                 }
               },
               onPointerMove: (e) {
+                if (_currentStroke == null) return;
                 final pressure = e.pressure > 0 ? e.pressure : 0.5;
-                _addPoint(_toCanvasPos(e.position), pressure);
+                _addPoint(_toCanvasPos(e.localPosition), pressure);
               },
               onPointerUp: (_) => _endStroke(),
               onPointerCancel: (_) => _endStroke(),
