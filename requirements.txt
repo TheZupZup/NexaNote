@@ -1,0 +1,20 @@
+# NexaNote Backend — Dépendances Python
+# Installe tout avec : pip install -r requirements.txt
+
+# API REST
+fastapi==0.135.3
+uvicorn==0.44.0
+
+# Serveur WebDAV
+wsgidav==4.3.3
+cheroot==11.1.2
+
+# Client HTTP (pour le moteur de sync)
+requests==2.33.0
+
+# Validation de données
+pydantic==2.12.5
+
+# Tests
+pytest==9.0.3
+httpx==0.28.1          # Nécessaire pour TestClient de FastAPI
