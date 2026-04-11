@@ -42,4 +42,6 @@ else
 fi
 
 cd "$APP_DIR"
+echo "📦 Mise à jour des dépendances Flutter..."
+flutter pub get
 GDK_BACKEND=x11 flutter run -d linux
