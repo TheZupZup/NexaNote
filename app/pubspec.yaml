@@ -1,0 +1,37 @@
+name: nexanote
+description: Open-source, privacy-friendly note-taking app
+publish_to: 'none'
+version: 0.1.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # HTTP client — parle avec le backend Python
+  http: ^1.2.0
+
+  # Stockage local des préférences (URL serveur, etc.)
+  shared_preferences: ^2.2.2
+
+  # Icônes Material
+  material_design_icons_flutter: ^7.0.7296
+
+  # Gestion d'état simple
+  provider: ^6.1.2
+
+  # Format de dates
+  intl: ^0.19.0
+
+  # UUID pour les IDs locaux
+  uuid: ^4.3.3
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.0
+
+flutter:
+  uses-material-design: true
