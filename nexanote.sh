@@ -1,20 +1,38 @@
 #!/bin/bash
-NEXANOTE_DIR="$HOME/NexaNote"
-APP_DIR="$NEXANOTE_DIR/app"
-VENV="$NEXANOTE_DIR/venv/bin/activate"
-LOG_FILE="/tmp/nexanote_backend.log"
+set -euo pipefail
 
-if ! curl -s http://127.0.0.1:8766/health > /dev/null 2>&1; then
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+NEXANOTE_DIR="$SCRIPT_DIR"
+APP_DIR="$NEXANOTE_DIR/app"
+VENV_ACTIVATE="$NEXANOTE_DIR/venv/bin/activate"
+LOG_FILE="/tmp/nexanote_backend.log"
+BACKEND_PID=""
+
+cleanup() {
+  if [[ -n "${BACKEND_PID}" ]]; then
+    kill "$BACKEND_PID" 2>/dev/null || true
+  fi
+}
+trap cleanup EXIT
+
+if ! curl -s http://127.0.0.1:8766/health >/dev/null 2>&1; then
   echo "🚀 Démarrage du backend..."
-  source "$VENV"
+  if [[ -f "$VENV_ACTIVATE" ]]; then
+    # shellcheck source=/dev/null
+    source "$VENV_ACTIVATE"
+  else
+    echo "⚠️  venv introuvable ($VENV_ACTIVATE), utilisation du Python système"
+  fi
+
   cd "$NEXANOTE_DIR"
-  python main.py > "$LOG_FILE" 2>&1 &
+  python main.py >"$LOG_FILE" 2>&1 &
   BACKEND_PID=$!
+
   echo -n "⏳ Attente"
-  for i in $(seq 1 20); do
+  for _ in $(seq 1 20); do
     sleep 0.5
     echo -n "."
-    if curl -s http://127.0.0.1:8766/health > /dev/null 2>&1; then
+    if curl -s http://127.0.0.1:8766/health >/dev/null 2>&1; then
       echo " ✅"
       break
     fi
@@ -24,5 +42,8 @@ else
 fi
 
 cd "$APP_DIR"
-GDK_BACKEND=x11 flutter run -d linux
-kill $BACKEND_PID 2>/dev/null
+if [[ -n "${NEXANOTE_GDK_BACKEND:-}" ]]; then
+  export GDK_BACKEND="$NEXANOTE_GDK_BACKEND"
+fi
+
+flutter run -d linux

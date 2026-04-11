@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import logging
 import sys
 from pathlib import Path
@@ -80,13 +81,15 @@ def build_app(
 
         # Middleware
         "middleware_stack": [
-            "wsgidav.debug_filter.WsgiDavDebugFilter",
             "wsgidav.error_printer.ErrorPrinter",
             "wsgidav.http_authenticator.HTTPAuthenticator",
             "wsgidav.dir_browser.WsgiDavDirBrowser",
             "wsgidav.request_resolver.RequestResolver",
         ],
     }
+
+    if importlib.util.find_spec("wsgidav.debug_filter"):
+        config["middleware_stack"].insert(0, "wsgidav.debug_filter.WsgiDavDebugFilter")
 
     return WsgiDAVApp(config)
 
