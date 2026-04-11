@@ -549,7 +549,9 @@ def create_app(db: NexaNoteDB) -> FastAPI:
         notes = db.list_notes(search_title=q)
         return [_note_to_schema(n) for n in notes]
 
-    return app
+    # ------------------------------------------------------------------
+    # Stockage
+    # ------------------------------------------------------------------
 
     @app.get("/storage")
     def get_storage_info():
@@ -561,3 +563,5 @@ def create_app(db: NexaNoteDB) -> FastAPI:
             "db_path": str(db.db_path),
             "db_size_mb": round(db_size / 1024 / 1024, 2),
         }
+
+    return app
