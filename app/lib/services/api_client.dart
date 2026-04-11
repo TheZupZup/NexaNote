@@ -305,4 +305,10 @@ class ApiClient {
     if (resp.statusCode == 200) return jsonDecode(resp.body);
     return {};
   }
+
+  Future<Map<String, dynamic>> getStorageInfo() async {
+    final resp = await http.get(Uri.parse('$baseUrl/storage'));
+    if (resp.statusCode == 200) return jsonDecode(resp.body);
+    return {};
+  }
 }

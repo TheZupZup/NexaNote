@@ -2,6 +2,7 @@
 // Écran de configuration — sync WebDAV NAS
 
 import 'dart:async';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -31,6 +32,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Color _syncColor = Colors.green;
   Map<String, dynamic> _syncStatus = {};
   Map<String, dynamic> _stats = {};
+  Map<String, dynamic> _storageInfo = {};
+  final _dataDirCtrl = TextEditingController();
+  bool _dataDirSaved = false;
 
   // Sync auto
   bool _autoSync = false;
@@ -41,6 +45,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     super.initState();
     _loadSettings();
     _loadStats();
+    _loadStorageInfo();
   }
 
   Future<void> _loadSettings() async {
@@ -63,6 +68,38 @@ class _SettingsScreenState extends State<SettingsScreen> {
       final stats = await state.client.getStats();
       setState(() => _stats = stats);
     } catch (_) {}
+  }
+
+  Future<void> _loadStorageInfo() async {
+    final state = context.read<AppState>();
+    try {
+      final info = await state.client.getStorageInfo();
+      final prefs = await SharedPreferences.getInstance();
+      final savedDir = prefs.getString('data_dir') ?? info['data_dir'] ?? '';
+      setState(() {
+        _storageInfo = info;
+        _dataDirCtrl.text = savedDir;
+      });
+    } catch (_) {}
+  }
+
+  Future<void> _saveDataDir() async {
+    final prefs = await SharedPreferences.getInstance();
+    final newDir = _dataDirCtrl.text.trim();
+    if (newDir.isEmpty) return;
+    await prefs.setString('data_dir', newDir);
+
+    // Écrire dans ~/.nexanote-config pour que nexanote.sh le lise au prochain démarrage
+    try {
+      final home = Platform.environment['HOME'] ?? '/tmp';
+      final configFile = File('$home/.nexanote-config');
+      await configFile.writeAsString('data_dir=$newDir\n');
+    } catch (_) {}
+
+    setState(() => _dataDirSaved = true);
+    Future.delayed(const Duration(seconds: 3), () {
+      if (mounted) setState(() => _dataDirSaved = false);
+    });
   }
 
   Future<void> _loadSyncStatus() async {
@@ -129,6 +166,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _nasUrlCtrl.dispose();
     _nasUserCtrl.dispose();
     _nasPassCtrl.dispose();
+    _dataDirCtrl.dispose();
     super.dispose();
   }
 
@@ -342,6 +380,97 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       ],
                     ),
                   ],
+                ],
+              ),
+            ),
+          ),
+
+          const SizedBox(height: 24),
+
+          // ── Dossier de notes ───────────────────────────────────
+          _SectionTitle(icon: Icons.folder_outlined, title: 'Dossier de notes'),
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // Dossier actuel (lu depuis l'API)
+                  if (_storageInfo['data_dir'] != null) ...[
+                    Row(children: [
+                      Icon(Icons.folder, size: 16, color: const Color(0xFF6366F1)),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          'Actuel : ${_storageInfo['data_dir']}',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: Theme.of(context).colorScheme.onSurface.withOpacity(0.6),
+                            fontFamily: 'monospace',
+                          ),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      if (_storageInfo['db_size_mb'] != null)
+                        Text(
+                          '${_storageInfo['db_size_mb']} MB',
+                          style: TextStyle(
+                            fontSize: 11,
+                            color: Theme.of(context).colorScheme.onSurface.withOpacity(0.4),
+                          ),
+                        ),
+                    ]),
+                    const SizedBox(height: 12),
+                  ],
+
+                  // Champ pour choisir un nouveau dossier
+                  TextField(
+                    controller: _dataDirCtrl,
+                    decoration: const InputDecoration(
+                      labelText: 'Dossier de données',
+                      hintText: '/home/user/mes-notes',
+                      prefixIcon: Icon(Icons.folder_open_outlined),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+
+                  // Info redémarrage
+                  Container(
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF6366F1).withOpacity(0.08),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Row(children: [
+                      const Icon(Icons.info_outline, size: 14, color: Color(0xFF6366F1)),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          'Le changement sera pris en compte au prochain démarrage via nexanote.sh',
+                          style: TextStyle(
+                            fontSize: 11,
+                            color: Theme.of(context).colorScheme.onSurface.withOpacity(0.6),
+                          ),
+                        ),
+                      ),
+                    ]),
+                  ),
+                  const SizedBox(height: 12),
+
+                  // Bouton sauvegarder
+                  SizedBox(
+                    width: double.infinity,
+                    child: OutlinedButton.icon(
+                      icon: _dataDirSaved
+                          ? const Icon(Icons.check_circle, color: Colors.green, size: 16)
+                          : const Icon(Icons.save_outlined, size: 16),
+                      label: Text(_dataDirSaved ? 'Sauvegardé !' : 'Sauvegarder le dossier'),
+                      onPressed: _saveDataDir,
+                      style: _dataDirSaved
+                          ? OutlinedButton.styleFrom(foregroundColor: Colors.green)
+                          : null,
+                    ),
+                  ),
                 ],
               ),
             ),
