@@ -23,7 +23,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
     await state.connect(url: _controller.text.trim());
     if (mounted && !state.isConnected) {
       setState(() {
-        _error = 'Cannot reach the server.\nMake sure NexaNote backend is running:\n  python main.py';
+        _error = 'Cannot reach the server.\nStart NexaNote backend from the project folder:\n  bash nexanote.sh\nor run:\n  python main.py';
         _connecting = false;
       });
     }
@@ -150,9 +150,9 @@ class _ConnectScreenState extends State<ConnectScreen> {
                                 color: scheme.onSurface.withOpacity(0.7))),
                       ]),
                       const SizedBox(height: 8),
-                      _code('cd ~/NexaNote'),
-                      _code('source venv/bin/activate'),
+                      _code('cd <your-folder>/NexaNote'),
                       _code('python main.py'),
+                      _code('# or: bash nexanote.sh'),
                     ],
                   ),
                 ),
