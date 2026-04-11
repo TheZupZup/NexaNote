@@ -37,7 +37,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
       body: Center(
         child: ConstrainedBox(
           constraints: const BoxConstraints(maxWidth: 420),
-          child: Padding(
+          child: SingleChildScrollView(
             padding: const EdgeInsets.all(32),
             child: Column(
               mainAxisSize: MainAxisSize.min,
@@ -150,9 +150,9 @@ class _ConnectScreenState extends State<ConnectScreen> {
                                 color: scheme.onSurface.withOpacity(0.7))),
                       ]),
                       const SizedBox(height: 8),
-                      _code('cd <your-folder>/NexaNote'),
-                      _code('python main.py'),
-                      _code('# or: bash nexanote.sh'),
+                      _code('cd ~/NexaNote'),
+                      _code('bash nexanote.sh'),
+                      _code('# or: python main.py'),
                     ],
                   ),
                 ),
@@ -168,6 +168,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
         padding: const EdgeInsets.only(top: 4),
         child: Text(
           text,
+          overflow: TextOverflow.ellipsis,
           style: const TextStyle(
               fontFamily: 'monospace', fontSize: 12, color: Color(0xFF6366F1)),
         ),
