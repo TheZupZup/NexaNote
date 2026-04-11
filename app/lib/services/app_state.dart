@@ -107,6 +107,6 @@ class AppState extends ChangeNotifier {
     try {
       final result = await client.triggerSync();
       return result['summary'] ?? 'Sync complete';
-    } catch (e) { return 'Sync failed: $e'; }
+    } catch (e) { return 'Sync failed: \$e'; }
   }
 }

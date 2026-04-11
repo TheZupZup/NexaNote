@@ -550,3 +550,14 @@ def create_app(db: NexaNoteDB) -> FastAPI:
         return [_note_to_schema(n) for n in notes]
 
     return app
+
+    @app.get("/storage")
+    def get_storage_info():
+        import os
+        data_dir = str(db.db_path.parent)
+        db_size = os.path.getsize(db.db_path) if db.db_path.exists() else 0
+        return {
+            "data_dir": data_dir,
+            "db_path": str(db.db_path),
+            "db_size_mb": round(db_size / 1024 / 1024, 2),
+        }

@@ -1,3 +1,7 @@
+// lib/screens/settings_screen.dart
+// Écran de configuration — sync WebDAV NAS
+
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -5,109 +9,509 @@ import '../services/app_state.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
+
   @override
   State<SettingsScreen> createState() => _SettingsScreenState();
 }
 
 class _SettingsScreenState extends State<SettingsScreen> {
+  // Backend API
+  final _apiUrlCtrl = TextEditingController();
+
+  // Sync WebDAV NAS
   final _nasUrlCtrl = TextEditingController();
   final _nasUserCtrl = TextEditingController();
   final _nasPassCtrl = TextEditingController();
-  bool _passVisible = false;
+  bool _nasPassVisible = false;
+
+  // État
   bool _isSyncing = false;
-  String? _syncMsg;
-  Map _stats = {};
+  bool _isSaved = false;
+  String? _syncMessage;
+  Color _syncColor = Colors.green;
+  Map<String, dynamic> _syncStatus = {};
+  Map<String, dynamic> _stats = {};
+
+  // Sync auto
+  bool _autoSync = false;
+  Timer? _autoSyncTimer;
 
   @override
   void initState() {
     super.initState();
-    _load();
+    _loadSettings();
+    _loadStats();
   }
 
-  Future<void> _load() async {
+  Future<void> _loadSettings() async {
     final prefs = await SharedPreferences.getInstance();
+    final state = context.read<AppState>();
     setState(() {
-      _nasUrlCtrl.text = prefs.getString('nas_url') ?? '';
+      _apiUrlCtrl.text = state.apiUrl;
+      _nasUrlCtrl.text = prefs.getString('nas_url') ?? 'http://192.168.132.214:5005/';
       _nasUserCtrl.text = prefs.getString('nas_user') ?? 'admin';
       _nasPassCtrl.text = prefs.getString('nas_pass') ?? '';
+      _autoSync = prefs.getBool('auto_sync') ?? false;
     });
+    if (_autoSync) _startAutoSync();
+    await _loadSyncStatus();
+  }
+
+  Future<void> _loadStats() async {
+    final state = context.read<AppState>();
     try {
-      final s = await context.read<AppState>().client.getStats();
-      setState(() => _stats = s);
+      final stats = await state.client.getStats();
+      setState(() => _stats = stats);
     } catch (_) {}
   }
 
-  Future<void> _save() async {
+  Future<void> _loadSyncStatus() async {
+    final state = context.read<AppState>();
+    try {
+      final status = await state.client.getSyncStatus();
+      setState(() => _syncStatus = status);
+    } catch (_) {}
+  }
+
+  Future<void> _saveSettings() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('nas_url', _nasUrlCtrl.text.trim());
     await prefs.setString('nas_user', _nasUserCtrl.text.trim());
     await prefs.setString('nas_pass', _nasPassCtrl.text);
-    await context.read<AppState>().client.configureSync(
+    await prefs.setBool('auto_sync', _autoSync);
+
+    // Configure le sync sur le backend
+    final state = context.read<AppState>();
+    await state.client.configureSync(
       serverUrl: _nasUrlCtrl.text.trim(),
       username: _nasUserCtrl.text.trim(),
       password: _nasPassCtrl.text,
     );
-    if (mounted) ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Saved ✅')));
+
+    setState(() => _isSaved = true);
+    Future.delayed(const Duration(seconds: 2), () {
+      if (mounted) setState(() => _isSaved = false);
+    });
   }
 
-  Future<void> _sync() async {
-    await _save();
-    setState(() { _isSyncing = true; _syncMsg = null; });
-    final msg = await context.read<AppState>().triggerSync();
-    setState(() { _isSyncing = false; _syncMsg = msg; });
+  Future<void> _triggerSync() async {
+    await _saveSettings();
+    setState(() {
+      _isSyncing = true;
+      _syncMessage = null;
+    });
+
+    final state = context.read<AppState>();
+    final msg = await state.triggerSync();
+    await _loadSyncStatus();
+    await _loadStats();
+
+    setState(() {
+      _isSyncing = false;
+      _syncMessage = msg;
+      _syncColor = msg.contains('failed') || msg.contains('erreur')
+          ? Colors.red
+          : Colors.green;
+    });
+  }
+
+  void _startAutoSync() {
+    _autoSyncTimer?.cancel();
+    _autoSyncTimer = Timer.periodic(const Duration(minutes: 5), (_) {
+      _triggerSync();
+    });
+  }
+
+  @override
+  void dispose() {
+    _autoSyncTimer?.cancel();
+    _apiUrlCtrl.dispose();
+    _nasUrlCtrl.dispose();
+    _nasUserCtrl.dispose();
+    _nasPassCtrl.dispose();
+    super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+
     return Scaffold(
-      appBar: AppBar(title: const Text('Settings')),
-      body: ListView(padding: const EdgeInsets.all(16), children: [
-        Card(child: Padding(padding: const EdgeInsets.all(16),
-          child: Row(mainAxisAlignment: MainAxisAlignment.spaceAround, children: [
-            _stat('Notebooks', '${_stats['notebooks'] ?? 0}'),
-            _stat('Notes', '${_stats['notes'] ?? 0}'),
-            _stat('Pages', '${_stats['pages'] ?? 0}'),
-          ]))),
-        const SizedBox(height: 16),
-        const Text('WEBDAV SYNC', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, letterSpacing: 1)),
-        const SizedBox(height: 8),
-        Card(child: Padding(padding: const EdgeInsets.all(16), child: Column(children: [
-          TextField(controller: _nasUrlCtrl,
-            decoration: const InputDecoration(labelText: 'NAS URL', hintText: 'http://192.168.X.X:5005/', prefixIcon: Icon(Icons.dns_outlined))),
-          const SizedBox(height: 12),
-          TextField(controller: _nasUserCtrl,
-            decoration: const InputDecoration(labelText: 'Username', prefixIcon: Icon(Icons.person_outline))),
-          const SizedBox(height: 12),
-          TextField(controller: _nasPassCtrl, obscureText: !_passVisible,
-            decoration: InputDecoration(labelText: 'Password', prefixIcon: const Icon(Icons.lock_outline),
-              suffixIcon: IconButton(icon: Icon(_passVisible ? Icons.visibility_off : Icons.visibility),
-                onPressed: () => setState(() => _passVisible = !_passVisible)))),
-          const SizedBox(height: 16),
-          Row(children: [
-            Expanded(child: OutlinedButton(onPressed: _save, child: const Text('Save'))),
-            const SizedBox(width: 12),
-            Expanded(child: FilledButton.icon(
-              onPressed: _isSyncing ? null : _sync,
-              icon: _isSyncing
-                ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
-                : const Icon(Icons.sync, size: 16),
-              label: Text(_isSyncing ? 'Syncing...' : 'Sync now'),
-              style: FilledButton.styleFrom(backgroundColor: const Color(0xFF6366F1)))),
-          ]),
-          if (_syncMsg != null) ...[
-            const SizedBox(height: 12),
-            Container(padding: const EdgeInsets.all(10),
-              decoration: BoxDecoration(color: Colors.green.withOpacity(0.1), borderRadius: BorderRadius.circular(8)),
-              child: Text(_syncMsg!, style: const TextStyle(fontSize: 12, color: Colors.green))),
-          ],
-        ]))),
-      ]),
+      appBar: AppBar(
+        title: const Text('Settings'),
+        actions: [
+          if (_isSaved)
+            const Padding(
+              padding: EdgeInsets.only(right: 16),
+              child: Row(
+                children: [
+                  Icon(Icons.check_circle, color: Colors.green, size: 18),
+                  SizedBox(width: 4),
+                  Text('Saved', style: TextStyle(color: Colors.green, fontSize: 13)),
+                ],
+              ),
+            ),
+        ],
+      ),
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+
+          // ── Stats ──────────────────────────────────────────────
+          _SectionTitle(icon: Icons.bar_chart, title: 'Storage'),
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceAround,
+                children: [
+                  _StatChip(label: 'Notebooks', value: '${_stats['notebooks'] ?? 0}'),
+                  _StatChip(label: 'Notes', value: '${_stats['notes'] ?? 0}'),
+                  _StatChip(label: 'Pages', value: '${_stats['pages'] ?? 0}'),
+                  _StatChip(label: 'Strokes', value: '${_stats['strokes'] ?? 0}'),
+                ],
+              ),
+            ),
+          ),
+
+          const SizedBox(height: 24),
+
+          // ── Sync NAS WebDAV ────────────────────────────────────
+          _SectionTitle(icon: Icons.sync, title: 'WebDAV Sync — NAS'),
+
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // URL NAS
+                  TextField(
+                    controller: _nasUrlCtrl,
+                    decoration: const InputDecoration(
+                      labelText: 'NAS WebDAV URL',
+                      hintText: 'http://192.168.132.214:5005/',
+                      prefixIcon: Icon(Icons.dns_outlined),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+
+                  // Username
+                  TextField(
+                    controller: _nasUserCtrl,
+                    decoration: const InputDecoration(
+                      labelText: 'Username',
+                      hintText: 'admin',
+                      prefixIcon: Icon(Icons.person_outline),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+
+                  // Password
+                  TextField(
+                    controller: _nasPassCtrl,
+                    obscureText: !_nasPassVisible,
+                    decoration: InputDecoration(
+                      labelText: 'Password',
+                      prefixIcon: const Icon(Icons.lock_outline),
+                      suffixIcon: IconButton(
+                        icon: Icon(_nasPassVisible
+                            ? Icons.visibility_off
+                            : Icons.visibility),
+                        onPressed: () => setState(
+                            () => _nasPassVisible = !_nasPassVisible),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+
+                  // Auto sync toggle
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Auto sync every 5 minutes'),
+                    subtitle: const Text('Sync automatically in background'),
+                    value: _autoSync,
+                    activeColor: const Color(0xFF6366F1),
+                    onChanged: (v) {
+                      setState(() => _autoSync = v);
+                      if (v) {
+                        _startAutoSync();
+                      } else {
+                        _autoSyncTimer?.cancel();
+                      }
+                    },
+                  ),
+
+                  const SizedBox(height: 8),
+
+                  // Boutons
+                  Row(
+                    children: [
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          icon: const Icon(Icons.save_outlined, size: 16),
+                          label: const Text('Save'),
+                          onPressed: _saveSettings,
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: FilledButton.icon(
+                          icon: _isSyncing
+                              ? const SizedBox(
+                                  width: 16,
+                                  height: 16,
+                                  child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                      color: Colors.white),
+                                )
+                              : const Icon(Icons.sync, size: 16),
+                          label: Text(_isSyncing ? 'Syncing...' : 'Sync now'),
+                          onPressed: _isSyncing ? null : _triggerSync,
+                          style: FilledButton.styleFrom(
+                            backgroundColor: const Color(0xFF6366F1),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+
+                  // Message résultat sync
+                  if (_syncMessage != null) ...[
+                    const SizedBox(height: 12),
+                    Container(
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(
+                        color: _syncColor.withOpacity(0.1),
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: _syncColor.withOpacity(0.3)),
+                      ),
+                      child: Row(
+                        children: [
+                          Icon(
+                            _syncColor == Colors.green
+                                ? Icons.check_circle_outline
+                                : Icons.error_outline,
+                            color: _syncColor,
+                            size: 16,
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              _syncMessage!,
+                              style: TextStyle(
+                                  fontSize: 12, color: _syncColor),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+
+                  // Dernier statut sync
+                  if (_syncStatus.isNotEmpty &&
+                      _syncStatus['status'] != 'never_synced') ...[
+                    const SizedBox(height: 12),
+                    const Divider(),
+                    const SizedBox(height: 8),
+                    Text('Last sync',
+                        style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                            color: scheme.onSurface.withOpacity(0.5))),
+                    const SizedBox(height: 6),
+                    Row(
+                      children: [
+                        _SyncStat(
+                            label: 'Pulled',
+                            value: '${_syncStatus['notes_pulled'] ?? 0}'),
+                        const SizedBox(width: 16),
+                        _SyncStat(
+                            label: 'Pushed',
+                            value: '${_syncStatus['notes_pushed'] ?? 0}'),
+                        const SizedBox(width: 16),
+                        _SyncStat(
+                            label: 'Conflicts',
+                            value:
+                                '${_syncStatus['conflicts_resolved'] ?? 0}'),
+                        const SizedBox(width: 16),
+                        _SyncStat(
+                            label: 'Duration',
+                            value:
+                                '${(_syncStatus['duration_seconds'] as num?)?.toStringAsFixed(1) ?? '0'}s'),
+                      ],
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ),
+
+          const SizedBox(height: 24),
+
+          // ── Backend API ────────────────────────────────────────
+          _SectionTitle(icon: Icons.api, title: 'Backend API'),
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                children: [
+                  TextField(
+                    controller: _apiUrlCtrl,
+                    decoration: const InputDecoration(
+                      labelText: 'API URL',
+                      hintText: 'http://127.0.0.1:8766',
+                      prefixIcon: Icon(Icons.computer_outlined),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  SizedBox(
+                    width: double.infinity,
+                    child: OutlinedButton.icon(
+                      icon: const Icon(Icons.link, size: 16),
+                      label: const Text('Reconnect'),
+                      onPressed: () async {
+                        await context.read<AppState>().connect(
+                              url: _apiUrlCtrl.text.trim(),
+                            );
+                        if (mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(content: Text('Reconnecting...')),
+                          );
+                        }
+                      },
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+
+          const SizedBox(height: 24),
+
+          // ── About ──────────────────────────────────────────────
+          _SectionTitle(icon: Icons.info_outline, title: 'About'),
+          Card(
+            child: Column(
+              children: [
+                ListTile(
+                  leading: Container(
+                    width: 36,
+                    height: 36,
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF6366F1),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: const Icon(Icons.edit_note,
+                        color: Colors.white, size: 22),
+                  ),
+                  title: const Text('NexaNote',
+                      style: TextStyle(fontWeight: FontWeight.bold)),
+                  subtitle: const Text('v0.1.0 — Open-source note-taking'),
+                ),
+                const Divider(height: 1),
+                ListTile(
+                  leading: const Icon(Icons.code, size: 20),
+                  title: const Text('GitHub'),
+                  subtitle: const Text('github.com/YOUR_USER/NexaNote'),
+                  trailing: const Icon(Icons.open_in_new, size: 16),
+                  onTap: () {},
+                ),
+                ListTile(
+                  leading: const Icon(Icons.balance, size: 20),
+                  title: const Text('License'),
+                  subtitle: const Text('MPL 2.0'),
+                ),
+              ],
+            ),
+          ),
+
+          const SizedBox(height: 32),
+        ],
+      ),
     );
   }
-
-  Widget _stat(String label, String value) => Column(children: [
-    Text(value, style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: Color(0xFF6366F1))),
-    Text(label, style: const TextStyle(fontSize: 11)),
-  ]);
 }
+
+// ── Widgets helpers ──────────────────────────────────────────────
+
+class _SectionTitle extends StatelessWidget {
+  final IconData icon;
+  final String title;
+  const _SectionTitle({required this.icon, required this.title});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Row(
+        children: [
+          Icon(icon, size: 16,
+              color: Theme.of(context).colorScheme.onSurface.withOpacity(0.5)),
+          const SizedBox(width: 6),
+          Text(title.toUpperCase(),
+              style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 0.8,
+                  color: Theme.of(context)
+                      .colorScheme
+                      .onSurface
+                      .withOpacity(0.5))),
+        ],
+      ),
+    );
+  }
+}
+
+class _StatChip extends StatelessWidget {
+  final String label;
+  final String value;
+  const _StatChip({required this.label, required this.value});
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        Text(value,
+            style: const TextStyle(
+                fontSize: 22,
+                fontWeight: FontWeight.bold,
+                color: Color(0xFF6366F1))),
+        Text(label,
+            style: TextStyle(
+                fontSize: 11,
+                color: Theme.of(context)
+                    .colorScheme
+                    .onSurface
+                    .withOpacity(0.5))),
+      ],
+    );
+  }
+}
+
+class _SyncStat extends StatelessWidget {
+  final String label;
+  final String value;
+  const _SyncStat({required this.label, required this.value});
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(value,
+            style: const TextStyle(
+                fontSize: 16, fontWeight: FontWeight.bold)),
+        Text(label,
+            style: TextStyle(
+                fontSize: 11,
+                color: Theme.of(context)
+                    .colorScheme
+                    .onSurface
+                    .withOpacity(0.5))),
+      ],
+    );
+  }
+}
+

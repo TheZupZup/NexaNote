@@ -24,5 +24,5 @@ else
 fi
 
 cd "$APP_DIR"
-flutter run -d linux
+GDK_BACKEND=x11 flutter run -d linux
 kill $BACKEND_PID 2>/dev/null
