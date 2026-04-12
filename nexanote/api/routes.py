@@ -1,13 +1,18 @@
 """
-NexaNote — API REST (FastAPI)
-Interface HTTP que l'app Flutter consomme pour toutes les opérations.
+REST API / Interface REST FastAPI
 
-Routes :
-  GET    /health                      → statut du serveur
-  GET    /notebooks                   → liste des carnets
-  POST   /notebooks                   → créer un carnet
-  GET    /notebooks/{id}              → détails d'un carnet
-  PUT    /notebooks/{id}              → modifier un carnet
+EN: HTTP interface consumed by the Flutter app for all data operations.
+    Runs on port 8766 alongside the WebDAV server (port 8765).
+
+FR: Interface HTTP consommée par l'app Flutter pour toutes les opérations.
+    Tourne sur le port 8766 en parallèle du serveur WebDAV (port 8765).
+
+Routes:
+  GET    /health                      → server status / statut du serveur
+  GET    /notebooks                   → list notebooks / liste des carnets
+  POST   /notebooks                   → create notebook / créer un carnet
+  GET    /notebooks/{id}              → notebook detail / détails d'un carnet
+  PUT    /notebooks/{id}              → update notebook / modifier un carnet
   DELETE /notebooks/{id}              → supprimer un carnet
 
   GET    /notes                       → liste des notes (filtrable)
@@ -31,7 +36,9 @@ Routes :
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -255,9 +262,38 @@ def create_app(db: NexaNoteDB) -> FastAPI:
         allow_headers=["*"],
     )
 
-    # État sync
+    # EN: Non-sensitive sync fields that are safe to write to disk.
+    #     Password is intentionally excluded — never persisted in plain text.
+    # FR: Champs de sync non-sensibles sûrs à écrire sur disque.
+    #     Le mot de passe est exclu intentionnellement — jamais écrit en clair.
+    _PERSIST_FIELDS = {"server_url", "username", "conflict_strategy"}
+
     _last_sync_report: dict = {}
     _sync_config: dict = {}
+    _sync_config_path = db.db_path.parent / "sync_config.json"
+
+    def _save_sync_config_to_disk() -> None:
+        """
+        EN: Persist non-sensitive sync fields to disk.
+            File permissions are set to 0o600 (owner read/write only).
+            Password is never written — user must re-enter it after a restart.
+        FR: Persiste les champs non-sensibles sur disque.
+            Permissions du fichier : 0o600 (lecture/écriture propriétaire uniquement).
+            Le mot de passe n'est jamais écrit — l'utilisateur doit le re-saisir après redémarrage.
+        """
+        safe = {k: v for k, v in _sync_config.items() if k in _PERSIST_FIELDS}
+        try:
+            _sync_config_path.write_text(json.dumps(safe, indent=2))
+            os.chmod(_sync_config_path, 0o600)
+        except OSError as exc:
+            logger.warning(f"Could not persist sync config: {exc}")
+
+    if _sync_config_path.exists():
+        try:
+            _sync_config.update(json.loads(_sync_config_path.read_text()))
+            logger.info(f"Sync config loaded from {_sync_config_path}")
+        except (OSError, json.JSONDecodeError, ValueError) as exc:
+            logger.warning(f"Could not load sync config: {exc}")
 
     # ------------------------------------------------------------------
     # Health
@@ -497,8 +533,14 @@ def create_app(db: NexaNoteDB) -> FastAPI:
 
     @app.post("/sync/configure")
     def configure_sync(config: SyncConfigSchema):
-        """Configure les paramètres de connexion WebDAV."""
+        """
+        EN: Save WebDAV connection settings in memory and persist safe fields to disk.
+            The password is kept in memory only and is never written to disk.
+        FR: Sauvegarde les paramètres WebDAV en mémoire et persiste les champs
+            sûrs sur disque. Le mot de passe reste en mémoire uniquement.
+        """
         _sync_config.update(config.model_dump())
+        _save_sync_config_to_disk()
         return {"status": "configured", "server_url": config.server_url}
 
     @app.post("/sync/trigger", response_model=SyncReportSchema)
