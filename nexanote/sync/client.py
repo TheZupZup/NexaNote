@@ -1,14 +1,13 @@
 """
-NexaNote — Client de synchronisation WebDAV
-Tourne sur l'appareil (Android/Linux/Windows), compare les notes
-locales avec le serveur et synchronise intelligemment.
+WebDAV Sync Client / Client de synchronisation WebDAV
 
-Flux de sync :
-  1. PULL  — récupérer les changements du serveur
-  2. DIFF  — comparer avec la version locale
-  3. RESOLVE — résoudre les conflits
-  4. PUSH  — envoyer les notes locales modifiées
-  5. COMMIT — marquer tout comme SYNCED
+EN: Runs on the device (Linux/Android/Windows). Compares local notes with a
+    remote WebDAV server and synchronises them intelligently.
+    Sync flow: PULL → DIFF → RESOLVE CONFLICTS → PUSH → COMMIT (mark SYNCED)
+
+FR: Tourne sur l'appareil. Compare les notes locales avec un serveur WebDAV
+    distant et les synchronise intelligemment.
+    Flux : PULL → DIFF → RÉSOUDRE LES CONFLITS → PUSH → COMMIT (marquer SYNCED)
 """
 
 from __future__ import annotations
@@ -212,7 +211,8 @@ class WebDAVClient:
             resp = self.session.request(
                 "MKCOL", url, timeout=self.config.timeout_seconds
             )
-            return resp.status_code in (200, 201)
+            # 200/201 = créé, 405 = la ressource existe déjà (WebDAV standard)
+            return resp.status_code in (200, 201, 405)
         except requests.RequestException as e:
             logger.error(f"MKCOL échoué ({url}): {e}")
             return False
@@ -224,7 +224,8 @@ class WebDAVClient:
             resp = self.session.request(
                 "MKCOL", url, timeout=self.config.timeout_seconds
             )
-            return resp.status_code in (200, 201)
+            # 200/201 = créé, 405 = la ressource existe déjà (WebDAV standard)
+            return resp.status_code in (200, 201, 405)
         except requests.RequestException as e:
             logger.error(f"MKCOL note échoué ({url}): {e}")
             return False
@@ -594,11 +595,13 @@ class NexaNoteSyncEngine:
         if note.notebook_id:
             notebook = self.db.get_notebook(note.notebook_id)
 
-        if not notebook:
-            logger.warning(f"Note {note.title} sans carnet — skip push")
-            return
+        if notebook:
+            nb_slug = _notebook_to_slug(notebook)
+        else:
+            # Notes sans carnet → dossier "sans-carnet" sur le serveur
+            nb_slug = "sans-carnet"
+            logger.debug(f"Note {note.title!r} sans carnet → dossier '{nb_slug}'")
 
-        nb_slug = _notebook_to_slug(notebook)
         note_slug = _note_to_slug(note)
 
         # Créer le dossier carnet sur le serveur si nécessaire

@@ -1,13 +1,18 @@
 """
-NexaNote — API REST (FastAPI)
-Interface HTTP que l'app Flutter consomme pour toutes les opérations.
+REST API / Interface REST FastAPI
 
-Routes :
-  GET    /health                      → statut du serveur
-  GET    /notebooks                   → liste des carnets
-  POST   /notebooks                   → créer un carnet
-  GET    /notebooks/{id}              → détails d'un carnet
-  PUT    /notebooks/{id}              → modifier un carnet
+EN: HTTP interface consumed by the Flutter app for all data operations.
+    Runs on port 8766 alongside the WebDAV server (port 8765).
+
+FR: Interface HTTP consommée par l'app Flutter pour toutes les opérations.
+    Tourne sur le port 8766 en parallèle du serveur WebDAV (port 8765).
+
+Routes:
+  GET    /health                      → server status / statut du serveur
+  GET    /notebooks                   → list notebooks / liste des carnets
+  POST   /notebooks                   → create notebook / créer un carnet
+  GET    /notebooks/{id}              → notebook detail / détails d'un carnet
+  PUT    /notebooks/{id}              → update notebook / modifier un carnet
   DELETE /notebooks/{id}              → supprimer un carnet
 
   GET    /notes                       → liste des notes (filtrable)
@@ -255,9 +260,21 @@ def create_app(db: NexaNoteDB) -> FastAPI:
         allow_headers=["*"],
     )
 
-    # État sync
+    # EN: Sync state — config persisted to data_dir/sync_config.json so it
+    #     survives backend restarts (no need to re-enter credentials each time).
+    # FR: État de sync — la config est persistée dans sync_config.json pour
+    #     survivre aux redémarrages du backend.
     _last_sync_report: dict = {}
     _sync_config: dict = {}
+    _sync_config_path = db.db_path.parent / "sync_config.json"
+
+    if _sync_config_path.exists():
+        try:
+            import json as _json
+            _sync_config.update(_json.loads(_sync_config_path.read_text()))
+            logger.info(f"Sync config loaded from {_sync_config_path}")
+        except Exception as exc:
+            logger.warning(f"Could not load sync config: {exc}")
 
     # ------------------------------------------------------------------
     # Health
@@ -497,8 +514,18 @@ def create_app(db: NexaNoteDB) -> FastAPI:
 
     @app.post("/sync/configure")
     def configure_sync(config: SyncConfigSchema):
-        """Configure les paramètres de connexion WebDAV."""
+        """
+        EN: Save WebDAV connection settings and persist them to disk.
+        FR: Sauvegarde les paramètres WebDAV et les persiste sur disque.
+        """
         _sync_config.update(config.model_dump())
+        # EN: Persist to disk so credentials survive a backend restart.
+        # FR: Persiste sur disque pour survivre aux redémarrages du backend.
+        try:
+            import json as _json
+            _sync_config_path.write_text(_json.dumps(_sync_config, indent=2))
+        except Exception as exc:
+            logger.warning(f"Could not persist sync config: {exc}")
         return {"status": "configured", "server_url": config.server_url}
 
     @app.post("/sync/trigger", response_model=SyncReportSchema)
