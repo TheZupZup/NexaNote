@@ -36,7 +36,9 @@ Routes:
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -260,20 +262,37 @@ def create_app(db: NexaNoteDB) -> FastAPI:
         allow_headers=["*"],
     )
 
-    # EN: Sync state — config persisted to data_dir/sync_config.json so it
-    #     survives backend restarts (no need to re-enter credentials each time).
-    # FR: État de sync — la config est persistée dans sync_config.json pour
-    #     survivre aux redémarrages du backend.
+    # EN: Non-sensitive sync fields that are safe to write to disk.
+    #     Password is intentionally excluded — never persisted in plain text.
+    # FR: Champs de sync non-sensibles sûrs à écrire sur disque.
+    #     Le mot de passe est exclu intentionnellement — jamais écrit en clair.
+    _PERSIST_FIELDS = {"server_url", "username", "conflict_strategy"}
+
     _last_sync_report: dict = {}
     _sync_config: dict = {}
     _sync_config_path = db.db_path.parent / "sync_config.json"
 
+    def _save_sync_config_to_disk() -> None:
+        """
+        EN: Persist non-sensitive sync fields to disk.
+            File permissions are set to 0o600 (owner read/write only).
+            Password is never written — user must re-enter it after a restart.
+        FR: Persiste les champs non-sensibles sur disque.
+            Permissions du fichier : 0o600 (lecture/écriture propriétaire uniquement).
+            Le mot de passe n'est jamais écrit — l'utilisateur doit le re-saisir après redémarrage.
+        """
+        safe = {k: v for k, v in _sync_config.items() if k in _PERSIST_FIELDS}
+        try:
+            _sync_config_path.write_text(json.dumps(safe, indent=2))
+            os.chmod(_sync_config_path, 0o600)
+        except OSError as exc:
+            logger.warning(f"Could not persist sync config: {exc}")
+
     if _sync_config_path.exists():
         try:
-            import json as _json
-            _sync_config.update(_json.loads(_sync_config_path.read_text()))
+            _sync_config.update(json.loads(_sync_config_path.read_text()))
             logger.info(f"Sync config loaded from {_sync_config_path}")
-        except Exception as exc:
+        except (OSError, json.JSONDecodeError, ValueError) as exc:
             logger.warning(f"Could not load sync config: {exc}")
 
     # ------------------------------------------------------------------
@@ -515,17 +534,13 @@ def create_app(db: NexaNoteDB) -> FastAPI:
     @app.post("/sync/configure")
     def configure_sync(config: SyncConfigSchema):
         """
-        EN: Save WebDAV connection settings and persist them to disk.
-        FR: Sauvegarde les paramètres WebDAV et les persiste sur disque.
+        EN: Save WebDAV connection settings in memory and persist safe fields to disk.
+            The password is kept in memory only and is never written to disk.
+        FR: Sauvegarde les paramètres WebDAV en mémoire et persiste les champs
+            sûrs sur disque. Le mot de passe reste en mémoire uniquement.
         """
         _sync_config.update(config.model_dump())
-        # EN: Persist to disk so credentials survive a backend restart.
-        # FR: Persiste sur disque pour survivre aux redémarrages du backend.
-        try:
-            import json as _json
-            _sync_config_path.write_text(_json.dumps(_sync_config, indent=2))
-        except Exception as exc:
-            logger.warning(f"Could not persist sync config: {exc}")
+        _save_sync_config_to_disk()
         return {"status": "configured", "server_url": config.server_url}
 
     @app.post("/sync/trigger", response_model=SyncReportSchema)

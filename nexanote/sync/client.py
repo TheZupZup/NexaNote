@@ -30,6 +30,10 @@ from nexanote.sync.conflict import ConflictResolver, ConflictStrategy
 
 logger = logging.getLogger("nexanote.sync.client")
 
+# EN: Fallback folder name on the remote server for notes not assigned to any notebook.
+# FR: Nom du dossier de repli sur le serveur distant pour les notes sans carnet.
+DEFAULT_NOTEBOOK_SLUG = "uncategorized"
+
 
 # ---------------------------------------------------------------------------
 # Config
@@ -122,6 +126,20 @@ class WebDAVClient:
         path = "/".join(quote(p, safe="") for p in parts if p)
         return urljoin(self.base_url, path)
 
+    @staticmethod
+    def _is_mkcol_success(status_code: int) -> bool:
+        """
+        EN: Returns True when a MKCOL response means the collection was created
+            or already exists. Per the WebDAV spec (RFC 4918):
+              201 = Created
+              405 = Method Not Allowed → the resource already exists (success for us)
+        FR: Retourne True si la réponse MKCOL signifie que la collection a été
+            créée ou existe déjà. Selon la spec WebDAV (RFC 4918) :
+              201 = Créé
+              405 = Method Not Allowed → la ressource existe déjà (succès pour nous)
+        """
+        return status_code in (200, 201, 405)
+
     def ping(self) -> bool:
         """Vérifie que le serveur est accessible."""
         try:
@@ -205,29 +223,23 @@ class WebDAVClient:
             return False
 
     def create_notebook_dir(self, notebook_slug: str) -> bool:
-        """MKCOL /{notebook} — crée un dossier carnet sur le serveur."""
+        """MKCOL /{notebook} — creates a notebook folder on the remote server."""
         url = self._url(notebook_slug)
         try:
-            resp = self.session.request(
-                "MKCOL", url, timeout=self.config.timeout_seconds
-            )
-            # 200/201 = créé, 405 = la ressource existe déjà (WebDAV standard)
-            return resp.status_code in (200, 201, 405)
+            resp = self.session.request("MKCOL", url, timeout=self.config.timeout_seconds)
+            return self._is_mkcol_success(resp.status_code)
         except requests.RequestException as e:
-            logger.error(f"MKCOL échoué ({url}): {e}")
+            logger.error(f"MKCOL failed ({url}): {e}")
             return False
 
     def create_note_dir(self, notebook_slug: str, note_slug: str) -> bool:
-        """MKCOL /{notebook}/{note}"""
+        """MKCOL /{notebook}/{note} — creates a note folder on the remote server."""
         url = self._url(notebook_slug, note_slug)
         try:
-            resp = self.session.request(
-                "MKCOL", url, timeout=self.config.timeout_seconds
-            )
-            # 200/201 = créé, 405 = la ressource existe déjà (WebDAV standard)
-            return resp.status_code in (200, 201, 405)
+            resp = self.session.request("MKCOL", url, timeout=self.config.timeout_seconds)
+            return self._is_mkcol_success(resp.status_code)
         except requests.RequestException as e:
-            logger.error(f"MKCOL note échoué ({url}): {e}")
+            logger.error(f"MKCOL note failed ({url}): {e}")
             return False
 
     def _propfind(self, url: str, depth: int = 1) -> list[dict]:
@@ -598,9 +610,10 @@ class NexaNoteSyncEngine:
         if notebook:
             nb_slug = _notebook_to_slug(notebook)
         else:
-            # Notes sans carnet → dossier "sans-carnet" sur le serveur
-            nb_slug = "sans-carnet"
-            logger.debug(f"Note {note.title!r} sans carnet → dossier '{nb_slug}'")
+            # EN: Notes without a notebook go into the default fallback folder.
+            # FR: Les notes sans carnet sont placées dans le dossier de repli par défaut.
+            nb_slug = DEFAULT_NOTEBOOK_SLUG
+            logger.debug(f"Note {note.title!r} has no notebook → using '{nb_slug}' folder")
 
         note_slug = _note_to_slug(note)
 
