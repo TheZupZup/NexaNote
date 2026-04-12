@@ -73,8 +73,52 @@ class NexaNoteApp extends StatelessWidget {
   }
 }
 
-class _SplashScreen extends StatelessWidget {
+class _SplashScreen extends StatefulWidget {
   const _SplashScreen();
+
+  @override
+  State<_SplashScreen> createState() => _SplashScreenState();
+}
+
+class _SplashScreenState extends State<_SplashScreen> with SingleTickerProviderStateMixin {
+  late AnimationController _animationController;
+  late Animation<double> _fadeAnimation;
+  late Animation<double> _scaleAnimation;
+  String _loadingMessage = 'Starting...';
+
+  @override
+  void initState() {
+    super.initState();
+    _animationController = AnimationController(
+      duration: const Duration(milliseconds: 1500),
+      vsync: this,
+    )..repeat(reverse: true);
+
+    _fadeAnimation = Tween<double>(begin: 0.6, end: 1.0).animate(
+      CurvedAnimation(parent: _animationController, curve: Curves.easeInOut),
+    );
+
+    _scaleAnimation = Tween<double>(begin: 0.95, end: 1.05).animate(
+      CurvedAnimation(parent: _animationController, curve: Curves.easeInOut),
+    );
+
+    // Update loading message
+    Future.delayed(const Duration(milliseconds: 500), () {
+      if (mounted) setState(() => _loadingMessage = 'Connecting...');
+    });
+    Future.delayed(const Duration(milliseconds: 1500), () {
+      if (mounted) setState(() => _loadingMessage = 'Loading notebooks...');
+    });
+    Future.delayed(const Duration(milliseconds: 2500), () {
+      if (mounted) setState(() => _loadingMessage = 'Almost ready...');
+    });
+  }
+
+  @override
+  void dispose() {
+    _animationController.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -83,14 +127,32 @@ class _SplashScreen extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Container(
-              width: 80,
-              height: 80,
-              decoration: BoxDecoration(
-                color: const Color(0xFF6366F1),
-                borderRadius: BorderRadius.circular(20),
-              ),
-              child: const Icon(Icons.edit_note, color: Colors.white, size: 48),
+            AnimatedBuilder(
+              animation: _animationController,
+              builder: (context, child) {
+                return Transform.scale(
+                  scale: _scaleAnimation.value,
+                  child: Opacity(
+                    opacity: _fadeAnimation.value,
+                    child: Container(
+                      width: 80,
+                      height: 80,
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF6366F1),
+                        borderRadius: BorderRadius.circular(20),
+                        boxShadow: [
+                          BoxShadow(
+                            color: const Color(0xFF6366F1).withOpacity(0.3),
+                            blurRadius: 20,
+                            spreadRadius: 2,
+                          ),
+                        ],
+                      ),
+                      child: const Icon(Icons.edit_note, color: Colors.white, size: 48),
+                    ),
+                  ),
+                );
+              },
             ),
             const SizedBox(height: 24),
             Text(
@@ -100,8 +162,26 @@ class _SplashScreen extends StatelessWidget {
                     color: const Color(0xFF6366F1),
                   ),
             ),
-            const SizedBox(height: 16),
-            const CircularProgressIndicator(color: Color(0xFF6366F1)),
+            const SizedBox(height: 8),
+            AnimatedSwitcher(
+              duration: const Duration(milliseconds: 300),
+              child: Text(
+                _loadingMessage,
+                key: ValueKey<String>(_loadingMessage),
+                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                      color: Theme.of(context).colorScheme.onSurface.withOpacity(0.6),
+                    ),
+              ),
+            ),
+            const SizedBox(height: 24),
+            SizedBox(
+              width: 120,
+              child: LinearProgressIndicator(
+                backgroundColor: const Color(0xFF6366F1).withOpacity(0.2),
+                color: const Color(0xFF6366F1),
+                borderRadius: BorderRadius.circular(4),
+              ),
+            ),
           ],
         ),
       ),
