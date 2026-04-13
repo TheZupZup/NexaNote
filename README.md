@@ -5,7 +5,11 @@ Open-source, privacy-friendly, self-hostable note-taking app with stylus support
 An alternative to Samsung Notes, OneNote and GoodNotes that respects your data.
 
 ---
+## About development
 
+This project is actively developed by me, with the help of AI tools for productivity and experimentation.
+All design decisions and direction are fully human-driven.
+---
 ## What works today
 
 - Typed notes with Markdown formatting
