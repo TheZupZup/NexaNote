@@ -9,6 +9,7 @@ An alternative to Samsung Notes, OneNote and GoodNotes that respects your data.
 
 This project is actively developed by me, with the help of AI tools for productivity and experimentation.
 All design decisions and direction are fully human-driven.
+
 ---
 ## What works today
 
