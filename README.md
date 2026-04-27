@@ -1,23 +1,3 @@
-## 🛡️ License & Commercial Use
-
-NexaNote is a project created and owned by TheZupZup.
-
-To protect the work behind this project while keeping it accessible, NexaNote is distributed under a **non-commercial license**.
-
-### TL;DR
-
-* ✅ Personal and non-profit use is allowed
-* ❌ Commercial use, resale, or SaaS hosting is not allowed without permission
-
-For full license terms, see the [LICENSE](./LICENSE) file.
-
----
-
-If you are interested in using NexaNote in a commercial context or want to discuss licensing:
-
-📩 [Contact me for commercial licensing](mailto:copyright.crewmate858@passmail.net)
-
-
 # NexaNote
 
 Open-source, privacy-friendly, self-hostable note-taking app with stylus support.
