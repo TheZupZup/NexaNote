@@ -1,8 +1,8 @@
 ## 🛡️ License & Commercial Use
 
-Nova is a project created and owned by TheZupZup.
+NexaNote is a project created and owned by TheZupZup.
 
-To protect the work behind this project while keeping it accessible, Nova is distributed under a **non-commercial license**.
+To protect the work behind this project while keeping it accessible, NexaNote is distributed under a **non-commercial license**.
 
 ### TL;DR
 
@@ -13,7 +13,7 @@ For full license terms, see the [LICENSE](./LICENSE) file.
 
 ---
 
-If you are interested in using Nova in a commercial context or want to discuss licensing:
+If you are interested in using NexaNote in a commercial context or want to discuss licensing:
 
 📩 [Contact me for commercial licensing](mailto:copyright.crewmate858@passmail.net)
 
