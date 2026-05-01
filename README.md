@@ -32,6 +32,8 @@ All design decisions and direction are fully human-driven.
 - End-to-end encryption
 - Docker deployment
 
+See [docs/android-roadmap.md](docs/android-roadmap.md) for the full Android & S26 Ultra plan.
+
 ---
 
 ## Architecture
