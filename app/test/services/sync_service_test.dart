@@ -3,6 +3,8 @@ import 'package:sqflite/sqflite.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 import 'package:nexanote/data/database/schema.dart';
+import 'package:nexanote/data/models/point.dart';
+import 'package:nexanote/data/models/stroke.dart';
 import 'package:nexanote/services/api_client.dart' as api;
 import 'package:nexanote/services/local_note_service.dart';
 import 'package:nexanote/services/sync_service.dart';
@@ -190,6 +192,100 @@ void main() {
 
     final notebooks = await local.getNotebooks();
     expect(notebooks.single.id, 'nb-r');
+  });
+
+  test('pullRemote preserves local strokes (metadata-only sync)', () async {
+    // Local note with a hand-written stroke that must survive sync.
+    final nb = await local.createNotebook('Sketches');
+    final note = await local.createNote('Doodle', notebookId: nb.id);
+    final stroke = Stroke(
+      id: 'stroke-keep-me',
+      noteId: note.id,
+      color: '#222222',
+      width: 1.5,
+      tool: 'pen',
+      createdAt: DateTime.utc(2024, 1, 1),
+      points: const [
+        StrokePoint(x: 1.0, y: 2.0, pressure: 0.5, timestampMs: 0),
+        StrokePoint(x: 3.0, y: 4.0, pressure: 0.7, timestampMs: 16),
+      ],
+    );
+    await local.saveStroke(stroke);
+
+    // Backend reports the same note back (metadata only — no strokes).
+    final now = DateTime.now().toUtc().toIso8601String();
+    fakeApi.remoteNotebooks = [
+      api.Notebook(
+        id: nb.id,
+        name: 'Sketches',
+        color: nb.color,
+        icon: 'notebook',
+        updatedAt: now,
+      ),
+    ];
+    fakeApi.remoteNotes = [
+      api.Note(
+        id: note.id,
+        title: 'Doodle',
+        noteType: 'handwritten',
+        notebookId: nb.id,
+        tags: const [],
+        isPinned: false,
+        isDeleted: false,
+        pageCount: 0,
+        updatedAt: now,
+        createdAt: now,
+      ),
+    ];
+
+    await sync.pullRemote();
+
+    final strokes = await local.getStrokesForNote(note.id);
+    expect(strokes, hasLength(1));
+    expect(strokes.first.id, 'stroke-keep-me');
+    expect(strokes.first.points, hasLength(2));
+    expect(strokes.first.points[1].x, 3.0);
+  });
+
+  test('pushLocal skips records already marked synced', () async {
+    // Simulate a post-pull state: notebooks/notes pulled from the
+    // backend land in the DB with sync_status='synced'. A subsequent
+    // push must not re-upload them, otherwise the backend (no upsert)
+    // grows duplicates on every sync cycle.
+    final now = DateTime.now().toUtc().toIso8601String();
+    fakeApi.remoteNotebooks = [
+      api.Notebook(
+        id: 'nb-pulled',
+        name: 'Pulled',
+        color: '#000000',
+        icon: 'notebook',
+        updatedAt: now,
+      ),
+    ];
+    fakeApi.remoteNotes = [
+      api.Note(
+        id: 'note-pulled',
+        title: 'Pulled note',
+        noteType: 'typed',
+        notebookId: 'nb-pulled',
+        tags: const [],
+        isPinned: false,
+        isDeleted: false,
+        pageCount: 0,
+        updatedAt: now,
+        createdAt: now,
+      ),
+    ];
+    await sync.pullRemote();
+    fakeApi.createdNotebooks.clear();
+    fakeApi.createdNotes.clear();
+
+    final counts = await sync.pushLocal();
+
+    expect(counts.notebooks, 0);
+    expect(counts.notes, 0);
+    expect(fakeApi.createdNotebooks, isEmpty);
+    expect(fakeApi.createdNotes, isEmpty);
   });
 
   test('exportAllData returns the snapshot used by SyncService', () async {

@@ -135,16 +135,16 @@ class NoteRepository {
     return rows.map(Note.fromMap).toList();
   }
 
-  /// Wipes notebooks/notes/strokes and inserts the supplied records in a
-  /// single transaction. Used by SyncService when replacing the local store
-  /// with the backend's authoritative state.
+  /// Replaces notebooks/notes with the supplied records in a single
+  /// transaction. Strokes and stroke_points are intentionally **not**
+  /// touched: handwritten ink is user content and Phase 4A sync is
+  /// metadata-only. Strokes whose parent note disappears are left as
+  /// orphans for a future stroke-aware sync phase to reconcile.
   Future<void> replaceAll({
     required List<Notebook> notebooks,
     required List<Note> notes,
   }) async {
     await _db.transaction((txn) async {
-      await txn.delete('stroke_points');
-      await txn.delete('strokes');
       await txn.delete('notes');
       await txn.delete('notebooks');
       for (final nb in notebooks) {

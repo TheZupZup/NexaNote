@@ -70,10 +70,12 @@ class LocalNoteService {
     return LocalSnapshot(notebooks: notebooks, notes: notes);
   }
 
-  /// Replaces the entire local store with [notebooks] and [notes].
+  /// Replaces local notebooks and notes with [notebooks] and [notes].
   ///
-  /// Existing data — including strokes — is wiped. This is the simple
-  /// "remote wins" strategy used by SyncService until incremental sync lands.
+  /// Local strokes are **preserved** — Phase 4A sync moves metadata only,
+  /// and ink is the user's irreplaceable content. Strokes whose parent
+  /// note has disappeared remain in the database as orphans until a
+  /// stroke-aware sync phase reconciles them.
   Future<void> importAllData({
     required List<Notebook> notebooks,
     required List<Note> notes,

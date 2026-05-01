@@ -48,18 +48,31 @@ class SyncService {
     );
   }
 
-  /// Uploads every local notebook and note to the backend via the existing
-  /// REST endpoints. The backend assigns its own IDs; the subsequent pull
-  /// brings those server-side records back into the local store.
+  /// Uploads only locally-originated or locally-modified records to the
+  /// backend. Records already marked `synced` are skipped.
+  ///
+  /// **Duplicate-upload guard.** The backend's create endpoints assign new
+  /// server-side IDs on every call and there is no upsert endpoint yet.
+  /// Pushing a record that already exists on the server would create a
+  /// duplicate. To avoid that we only push records whose [syncStatus] is
+  /// not `synced`. After [pullRemote] runs, every local record carries
+  /// `synced`, so subsequent [pushLocal] calls become no-ops until the
+  /// user creates or edits something locally.
+  ///
+  /// This guard is correct as long as nothing else mutates [syncStatus]
+  /// behind our back. Once the backend grows an idempotent upsert
+  /// endpoint, this filter can be relaxed.
   Future<_Counts> pushLocal() async {
     final snapshot = await _local.exportAllData();
     var notebooks = 0;
     var notes = 0;
     for (final nb in snapshot.notebooks) {
+      if (_isAlreadySynced(nb.syncStatus)) continue;
       await _api.createNotebook(name: nb.name, color: nb.color);
       notebooks++;
     }
     for (final note in snapshot.notes) {
+      if (_isAlreadySynced(note.syncStatus)) continue;
       await _api.createNote(
         title: note.title,
         noteType: note.noteType,
@@ -69,6 +82,8 @@ class SyncService {
     }
     return _Counts(notebooks: notebooks, notes: notes);
   }
+
+  static bool _isAlreadySynced(String status) => status == 'synced';
 
   /// Fetches the backend's notebooks and notes and overwrites the local DB.
   Future<_Counts> pullRemote() async {
