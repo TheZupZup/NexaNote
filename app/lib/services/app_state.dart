@@ -1,8 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
 import 'api_client.dart';
+import 'local_note_service.dart';
 
 class AppState extends ChangeNotifier {
+  final LocalNoteService _localService;
+
   String _apiUrl = 'http://127.0.0.1:8766';
   bool _isConnected = false;
   bool _isLoading = false;
@@ -10,6 +14,9 @@ class AppState extends ChangeNotifier {
   List<Note> _notes = [];
   Notebook? _selectedNotebook;
   Note? _selectedNote;
+
+  AppState({LocalNoteService? localService})
+      : _localService = localService ?? LocalNoteService();
 
   String get apiUrl => _apiUrl;
   bool get isConnected => _isConnected;
@@ -20,11 +27,20 @@ class AppState extends ChangeNotifier {
   Note? get selectedNote => _selectedNote;
   ApiClient get client => ApiClient(baseUrl: _apiUrl);
 
+  /// Single entry point for local persistence. Screens that need to read or
+  /// write notebooks, notes, or strokes from the on-device SQLite store go
+  /// through this service; AppState does not mirror its API.
+  LocalNoteService get localService => _localService;
+
   Future<void> init() async {
+    await initLocal();
     final prefs = await SharedPreferences.getInstance();
     _apiUrl = prefs.getString('api_url') ?? 'http://127.0.0.1:8766';
     await connect();
   }
+
+  /// Opens the local SQLite database. Safe to call from tests directly.
+  Future<void> initLocal() => _localService.initialize();
 
   Future<void> connect({String? url}) async {
     if (url != null) {
