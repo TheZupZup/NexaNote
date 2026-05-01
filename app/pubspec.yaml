@@ -30,10 +30,16 @@ dependencies:
   path_provider: ^2.1.5
   xdg_directories: ^1.1.0
 
+  # Local SQLite storage for offline-first note saving
+  sqflite: ^2.3.0
+
 dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^3.0.0
+
+  # In-memory SQLite for unit tests (desktop/CI)
+  sqflite_common_ffi: ^2.3.0
 
 flutter:
   uses-material-design: true
