@@ -37,6 +37,8 @@ class _DesktopLayout extends StatelessWidget {
           onSelect: state.selectNotebook,
           onCreate: () => _createNotebook(context),
           onSync: () => _sync(context),
+          isSyncing: state.isSyncing,
+          hasSyncError: state.syncError != null,
         )),
         VerticalDivider(width: 1, color: scheme.outlineVariant),
         SizedBox(width: 300, child: Column(children: [
@@ -79,12 +81,20 @@ class _DesktopLayout extends StatelessWidget {
   }
 
   Future<void> _sync(BuildContext context) async {
-    final msg = await context.read<AppState>().triggerSync();
-    if (context.mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(msg), duration: const Duration(seconds: 3)));
-    }
+    final state = context.read<AppState>();
+    await state.triggerSync();
+    if (context.mounted) _showSyncResult(context, state);
   }
+}
+
+void _showSyncResult(BuildContext context, AppState state) {
+  final error = state.syncError;
+  final message = error ?? state.syncMessage ?? 'Sync complete';
+  ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+    content: Text(message),
+    backgroundColor: error != null ? Colors.red.shade700 : null,
+    duration: const Duration(seconds: 3),
+  ));
 }
 
 class _MobileLayout extends StatelessWidget {
@@ -98,10 +108,23 @@ class _MobileLayout extends StatelessWidget {
       appBar: AppBar(
         title: Text(state.selectedNotebook?.name ?? 'NexaNote'),
         actions: [
-          IconButton(icon: const Icon(Icons.sync), onPressed: () async {
-            final msg = await state.triggerSync();
-            if (context.mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
-          }),
+          IconButton(
+            icon: state.isSyncing
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(
+                        strokeWidth: 2, color: Colors.white))
+                : Icon(state.syncError != null
+                    ? Icons.sync_problem
+                    : Icons.sync),
+            onPressed: state.isSyncing
+                ? null
+                : () async {
+                    await state.triggerSync();
+                    if (context.mounted) _showSyncResult(context, state);
+                  },
+          ),
         ],
       ),
       drawer: Drawer(child: NotebookSidebar(
@@ -113,9 +136,11 @@ class _MobileLayout extends StatelessWidget {
           if (name != null) await state.createNotebook(name, '#6366f1');
         },
         onSync: () async {
-          final msg = await state.triggerSync();
-          if (context.mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+          await state.triggerSync();
+          if (context.mounted) _showSyncResult(context, state);
         },
+        isSyncing: state.isSyncing,
+        hasSyncError: state.syncError != null,
       )),
       body: NotesList(
         notes: state.notes,
