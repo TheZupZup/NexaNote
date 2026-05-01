@@ -10,6 +10,8 @@ class NotebookSidebar extends StatelessWidget {
   final ValueChanged<Notebook?> onSelect;
   final VoidCallback onCreate;
   final VoidCallback onSync;
+  final bool isSyncing;
+  final bool hasSyncError;
 
   const NotebookSidebar({
     super.key,
@@ -18,6 +20,8 @@ class NotebookSidebar extends StatelessWidget {
     required this.onSelect,
     required this.onCreate,
     required this.onSync,
+    this.isSyncing = false,
+    this.hasSyncError = false,
   });
 
   @override
@@ -49,9 +53,23 @@ class NotebookSidebar extends StatelessWidget {
                       )),
               const Spacer(),
               IconButton(
-                icon: const Icon(Icons.sync, size: 18),
-                onPressed: onSync,
-                tooltip: 'Sync',
+                icon: isSyncing
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : Icon(
+                        hasSyncError ? Icons.sync_problem : Icons.sync,
+                        size: 18,
+                        color: hasSyncError ? Colors.red : null,
+                      ),
+                onPressed: isSyncing ? null : onSync,
+                tooltip: isSyncing
+                    ? 'Syncing…'
+                    : hasSyncError
+                        ? 'Last sync failed — tap to retry'
+                        : 'Sync',
                 visualDensity: VisualDensity.compact,
               ),
             ],

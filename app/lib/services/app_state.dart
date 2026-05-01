@@ -13,6 +13,9 @@ class AppState extends ChangeNotifier {
   String _apiUrl = 'http://127.0.0.1:8766';
   bool _isConnected = false;
   bool _isLoading = false;
+  bool _isSyncing = false;
+  String? _syncMessage;
+  String? _syncError;
   List<api.Notebook> _notebooks = [];
   List<api.Note> _notes = [];
   api.Notebook? _selectedNotebook;
@@ -24,6 +27,9 @@ class AppState extends ChangeNotifier {
   String get apiUrl => _apiUrl;
   bool get isConnected => _isConnected;
   bool get isLoading => _isLoading;
+  bool get isSyncing => _isSyncing;
+  String? get syncMessage => _syncMessage;
+  String? get syncError => _syncError;
   List<api.Notebook> get notebooks => _notebooks;
   List<api.Note> get notes => _notes;
   api.Notebook? get selectedNotebook => _selectedNotebook;
@@ -123,21 +129,48 @@ class AppState extends ChangeNotifier {
   void selectNote(api.Note? note) { _selectedNote = note; notifyListeners(); }
 
   Future<String> triggerSync() async {
+    _beginSync();
     try {
       final result = await client.triggerSync();
-      return result['summary'] ?? 'Sync complete';
-    } catch (e) { return 'Sync failed: $e'; }
+      final summary = result['summary'] ?? 'Sync complete';
+      _finishSync(message: summary);
+      return summary;
+    } catch (e) {
+      final message = 'Sync failed: $e';
+      _finishSync(error: message);
+      return message;
+    }
   }
 
   /// Push local changes to the backend and replace the local store with
   /// whatever the backend returns. Optional [service] override exists for
   /// tests; production callers leave it null.
   Future<SyncResult> syncNow({SyncService? service}) async {
-    await initLocal();
-    final svc = service ??
-        SyncService(apiClient: client, local: _localService);
-    final result = await svc.sync();
+    _beginSync();
+    try {
+      await initLocal();
+      final svc = service ??
+          SyncService(apiClient: client, local: _localService);
+      final result = await svc.sync();
+      _finishSync(message: 'Sync complete — ${result.summary}');
+      return result;
+    } catch (e) {
+      _finishSync(error: 'Sync failed: $e');
+      rethrow;
+    }
+  }
+
+  void _beginSync() {
+    _isSyncing = true;
+    _syncError = null;
+    _syncMessage = null;
     notifyListeners();
-    return result;
+  }
+
+  void _finishSync({String? message, String? error}) {
+    _isSyncing = false;
+    _syncMessage = message;
+    _syncError = error;
+    notifyListeners();
   }
 }
