@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'api_client.dart';
+// Aliased so the API DTOs are unambiguous: there are also `Notebook` / `Note`
+// classes in data/models reachable through [LocalNoteService].
+import 'api_client.dart' as api;
 import 'local_note_service.dart';
 
 class AppState extends ChangeNotifier {
@@ -10,10 +12,10 @@ class AppState extends ChangeNotifier {
   String _apiUrl = 'http://127.0.0.1:8766';
   bool _isConnected = false;
   bool _isLoading = false;
-  List<Notebook> _notebooks = [];
-  List<Note> _notes = [];
-  Notebook? _selectedNotebook;
-  Note? _selectedNote;
+  List<api.Notebook> _notebooks = [];
+  List<api.Note> _notes = [];
+  api.Notebook? _selectedNotebook;
+  api.Note? _selectedNote;
 
   AppState({LocalNoteService? localService})
       : _localService = localService ?? LocalNoteService();
@@ -21,11 +23,11 @@ class AppState extends ChangeNotifier {
   String get apiUrl => _apiUrl;
   bool get isConnected => _isConnected;
   bool get isLoading => _isLoading;
-  List<Notebook> get notebooks => _notebooks;
-  List<Note> get notes => _notes;
-  Notebook? get selectedNotebook => _selectedNotebook;
-  Note? get selectedNote => _selectedNote;
-  ApiClient get client => ApiClient(baseUrl: _apiUrl);
+  List<api.Notebook> get notebooks => _notebooks;
+  List<api.Note> get notes => _notes;
+  api.Notebook? get selectedNotebook => _selectedNotebook;
+  api.Note? get selectedNote => _selectedNote;
+  api.ApiClient get client => api.ApiClient(baseUrl: _apiUrl);
 
   /// Single entry point for local persistence. Screens that need to read or
   /// write notebooks, notes, or strokes from the on-device SQLite store go
@@ -63,7 +65,7 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<Notebook> createNotebook(String name, String color) async {
+  Future<api.Notebook> createNotebook(String name, String color) async {
     final nb = await client.createNotebook(name: name, color: color);
     _notebooks.insert(0, nb);
     notifyListeners();
@@ -77,7 +79,7 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
-  void selectNotebook(Notebook? nb) {
+  void selectNotebook(api.Notebook? nb) {
     _selectedNotebook = nb;
     notifyListeners();
     loadNotes(notebookId: nb?.id);
@@ -92,7 +94,7 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<Note> createNote({required String title, required String noteType, String template = 'blank'}) async {
+  Future<api.Note> createNote({required String title, required String noteType, String template = 'blank'}) async {
     final note = await client.createNote(
       title: title, noteType: noteType,
       notebookId: _selectedNotebook?.id, template: template);
@@ -117,7 +119,7 @@ class AppState extends ChangeNotifier {
     await client.savePageText(noteId, pageNum, content);
   }
 
-  void selectNote(Note? note) { _selectedNote = note; notifyListeners(); }
+  void selectNote(api.Note? note) { _selectedNote = note; notifyListeners(); }
 
   Future<String> triggerSync() async {
     try {
