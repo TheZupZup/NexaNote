@@ -6,6 +6,14 @@ import '../data/models/notebook.dart';
 import '../data/models/stroke.dart';
 import '../data/repositories/note_repository.dart';
 
+/// Bundle of all local notebooks and notes — the unit moved by SyncService.
+class LocalSnapshot {
+  final List<Notebook> notebooks;
+  final List<Note> notes;
+
+  const LocalSnapshot({required this.notebooks, required this.notes});
+}
+
 /// Owns local SQLite initialization and exposes a small, AppState-friendly
 /// surface over [NoteRepository].
 ///
@@ -51,6 +59,26 @@ class LocalNoteService {
   Future<void> saveStroke(Stroke stroke) => _repo.saveStroke(stroke);
   Future<List<Stroke>> getStrokesForNote(String noteId) =>
       _repo.getStrokesForNote(noteId);
+
+  /// Snapshot of all locally-stored notebooks and notes.
+  ///
+  /// Strokes are intentionally excluded — Phase 4A sync covers metadata only.
+  /// Used by SyncService to push local state to the backend.
+  Future<LocalSnapshot> exportAllData() async {
+    final notebooks = await _repo.getNotebooks(includeArchived: true);
+    final notes = await _repo.getAllNotes(includeDeleted: true);
+    return LocalSnapshot(notebooks: notebooks, notes: notes);
+  }
+
+  /// Replaces the entire local store with [notebooks] and [notes].
+  ///
+  /// Existing data — including strokes — is wiped. This is the simple
+  /// "remote wins" strategy used by SyncService until incremental sync lands.
+  Future<void> importAllData({
+    required List<Notebook> notebooks,
+    required List<Note> notes,
+  }) =>
+      _repo.replaceAll(notebooks: notebooks, notes: notes);
 
   /// Closes the database opened by this service. No-op when an injected
   /// [database] was supplied — the caller owns that connection.

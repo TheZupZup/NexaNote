@@ -124,6 +124,38 @@ class NoteRepository {
     );
   }
 
+  /// Returns every non-archived note across all notebooks, newest first.
+  Future<List<Note>> getAllNotes({bool includeDeleted = false}) async {
+    final where = includeDeleted ? null : 'is_deleted = 0 AND is_archived = 0';
+    final rows = await _db.query(
+      'notes',
+      where: where,
+      orderBy: 'updated_at DESC',
+    );
+    return rows.map(Note.fromMap).toList();
+  }
+
+  /// Wipes notebooks/notes/strokes and inserts the supplied records in a
+  /// single transaction. Used by SyncService when replacing the local store
+  /// with the backend's authoritative state.
+  Future<void> replaceAll({
+    required List<Notebook> notebooks,
+    required List<Note> notes,
+  }) async {
+    await _db.transaction((txn) async {
+      await txn.delete('stroke_points');
+      await txn.delete('strokes');
+      await txn.delete('notes');
+      await txn.delete('notebooks');
+      for (final nb in notebooks) {
+        await txn.insert('notebooks', nb.toMap());
+      }
+      for (final note in notes) {
+        await txn.insert('notes', note.toMap());
+      }
+    });
+  }
+
   // -----------------------------------------------------------------------
   // Strokes
   // -----------------------------------------------------------------------

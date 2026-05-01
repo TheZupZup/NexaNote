@@ -5,6 +5,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 // classes in data/models reachable through [LocalNoteService].
 import 'api_client.dart' as api;
 import 'local_note_service.dart';
+import 'sync_service.dart';
 
 class AppState extends ChangeNotifier {
   final LocalNoteService _localService;
@@ -126,5 +127,17 @@ class AppState extends ChangeNotifier {
       final result = await client.triggerSync();
       return result['summary'] ?? 'Sync complete';
     } catch (e) { return 'Sync failed: $e'; }
+  }
+
+  /// Push local changes to the backend and replace the local store with
+  /// whatever the backend returns. Optional [service] override exists for
+  /// tests; production callers leave it null.
+  Future<SyncResult> syncNow({SyncService? service}) async {
+    await initLocal();
+    final svc = service ??
+        SyncService(apiClient: client, local: _localService);
+    final result = await svc.sync();
+    notifyListeners();
+    return result;
   }
 }
