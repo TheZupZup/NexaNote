@@ -1,9 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import '../data/models/note.dart' as local;
-import '../data/models/notebook.dart' as local;
-import '../data/models/stroke.dart';
 import 'api_client.dart';
 import 'local_note_service.dart';
 
@@ -18,10 +15,6 @@ class AppState extends ChangeNotifier {
   Notebook? _selectedNotebook;
   Note? _selectedNote;
 
-  // Local-only state, sourced from the on-device SQLite store.
-  List<local.Notebook> _localNotebooks = [];
-  List<local.Note> _localNotes = [];
-
   AppState({LocalNoteService? localService})
       : _localService = localService ?? LocalNoteService();
 
@@ -34,9 +27,10 @@ class AppState extends ChangeNotifier {
   Note? get selectedNote => _selectedNote;
   ApiClient get client => ApiClient(baseUrl: _apiUrl);
 
+  /// Single entry point for local persistence. Screens that need to read or
+  /// write notebooks, notes, or strokes from the on-device SQLite store go
+  /// through this service; AppState does not mirror its API.
   LocalNoteService get localService => _localService;
-  List<local.Notebook> get localNotebooks => List.unmodifiable(_localNotebooks);
-  List<local.Note> get localNotes => List.unmodifiable(_localNotes);
 
   Future<void> init() async {
     await initLocal();
@@ -45,12 +39,8 @@ class AppState extends ChangeNotifier {
     await connect();
   }
 
-  /// Opens the local DB and loads any locally stored notebooks. Safe to call
-  /// from tests or from [init] in production.
-  Future<void> initLocal() async {
-    await _localService.initialize();
-    await loadLocalNotebooks();
-  }
+  /// Opens the local SQLite database. Safe to call from tests directly.
+  Future<void> initLocal() => _localService.initialize();
 
   Future<void> connect({String? url}) async {
     if (url != null) {
@@ -135,51 +125,4 @@ class AppState extends ChangeNotifier {
       return result['summary'] ?? 'Sync complete';
     } catch (e) { return 'Sync failed: $e'; }
   }
-
-  // -----------------------------------------------------------------------
-  // Local-only operations (offline-first store)
-  // -----------------------------------------------------------------------
-
-  Future<void> loadLocalNotebooks() async {
-    _localNotebooks = await _localService.getNotebooks();
-    notifyListeners();
-  }
-
-  Future<local.Notebook> createLocalNotebook(
-    String name, {
-    String color = '#6366f1',
-  }) async {
-    final nb = await _localService.createNotebook(name, color: color);
-    _localNotebooks = [..._localNotebooks, nb];
-    notifyListeners();
-    return nb;
-  }
-
-  Future<void> loadLocalNotesForNotebook(String notebookId) async {
-    _localNotes = await _localService.getNotesForNotebook(notebookId);
-    notifyListeners();
-  }
-
-  Future<local.Note> createLocalNote(
-    String title, {
-    String? notebookId,
-    String noteType = 'typed',
-  }) async {
-    final note = await _localService.createNote(
-      title,
-      notebookId: notebookId,
-      noteType: noteType,
-    );
-    _localNotes = [note, ..._localNotes];
-    notifyListeners();
-    return note;
-  }
-
-  Future<local.Note?> getLocalNoteById(String id) =>
-      _localService.getNoteById(id);
-
-  Future<void> saveStroke(Stroke stroke) => _localService.saveStroke(stroke);
-
-  Future<List<Stroke>> getStrokesForNote(String noteId) =>
-      _localService.getStrokesForNote(noteId);
 }

@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:sqflite/sqflite.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 import 'package:nexanote/data/database/schema.dart';
@@ -12,42 +13,42 @@ void main() {
     databaseFactory = databaseFactoryFfi;
   });
 
-  Future<LocalNoteService> newService() async {
-    final service = LocalNoteService(
-      databaseOpener: () => openDatabase(
-        inMemoryDatabasePath,
-        version: Schema.version,
-        onCreate: Schema.onCreate,
-      ),
+  late Database db;
+
+  setUp(() async {
+    db = await openDatabase(
+      inMemoryDatabasePath,
+      version: Schema.version,
+      onCreate: Schema.onCreate,
     );
+  });
+
+  tearDown(() async {
+    await db.close();
+  });
+
+  Future<LocalNoteService> newService() async {
+    final service = LocalNoteService(database: db);
     await service.initialize();
     return service;
   }
 
   group('LocalNoteService.initialize', () {
-    test('opens the database and marks the service initialized', () async {
+    test('marks the service initialized', () async {
       final service = await newService();
       expect(service.isInitialized, isTrue);
-      await service.close();
     });
 
-    test('throws StateError when used before initialize', () async {
-      final service = LocalNoteService(
-        databaseOpener: () => openDatabase(
-          inMemoryDatabasePath,
-          version: Schema.version,
-          onCreate: Schema.onCreate,
-        ),
-      );
+    test('throws StateError when used before initialize', () {
+      final service = LocalNoteService(database: db);
       expect(service.isInitialized, isFalse);
       expect(service.getNotebooks, throwsStateError);
     });
 
     test('is idempotent', () async {
       final service = await newService();
-      await service.initialize(); // should not throw or reopen
+      await service.initialize();
       expect(service.isInitialized, isTrue);
-      await service.close();
     });
   });
 
@@ -56,10 +57,6 @@ void main() {
 
     setUp(() async {
       service = await newService();
-    });
-
-    tearDown(() async {
-      await service.close();
     });
 
     test('createNotebook persists and getNotebooks returns it', () async {
@@ -92,10 +89,6 @@ void main() {
 
     setUp(() async {
       service = await newService();
-    });
-
-    tearDown(() async {
-      await service.close();
     });
 
     test('saveStroke + getStrokesForNote round-trips with points', () async {
