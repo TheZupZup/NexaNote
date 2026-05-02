@@ -30,7 +30,10 @@ class _DesktopLayout extends StatelessWidget {
     final scheme = Theme.of(context).colorScheme;
 
     return Scaffold(
-      body: Row(children: [
+      body: Column(children: [
+        if (!state.isBackendAvailable)
+          _OfflineBanner(message: state.backendErrorMessage),
+        Expanded(child: Row(children: [
         SizedBox(width: 240, child: NotebookSidebar(
           notebooks: state.notebooks,
           selected: state.selectedNotebook,
@@ -62,6 +65,7 @@ class _DesktopLayout extends StatelessWidget {
         Expanded(child: state.selectedNote != null
           ? NoteEditorScreen(note: state.selectedNote!)
           : _EmptyEditor()),
+      ])),
       ]),
     );
   }
@@ -127,6 +131,26 @@ class _MobileLayout extends StatelessWidget {
           ),
         ],
       ),
+      body: Column(children: [
+        if (!state.isBackendAvailable)
+          _OfflineBanner(message: state.backendErrorMessage),
+        Expanded(child: NotesList(
+          notes: state.notes,
+          selected: state.selectedNote,
+          isLoading: state.isLoading,
+          onSelect: (note) async {
+            final full = await state.client.getNote(note.id);
+            state.selectNote(full);
+            if (context.mounted) {
+              Navigator.push(context, MaterialPageRoute(
+                builder: (_) => ChangeNotifierProvider.value(
+                  value: state,
+                  child: NoteEditorScreen(note: full))));
+            }
+          },
+          onDelete: (note) => state.deleteNote(note.id),
+        )),
+      ]),
       drawer: Drawer(child: NotebookSidebar(
         notebooks: state.notebooks,
         selected: state.selectedNotebook,
@@ -142,22 +166,6 @@ class _MobileLayout extends StatelessWidget {
         isSyncing: state.isSyncing,
         hasSyncError: state.syncError != null,
       )),
-      body: NotesList(
-        notes: state.notes,
-        selected: state.selectedNote,
-        isLoading: state.isLoading,
-        onSelect: (note) async {
-          final full = await state.client.getNote(note.id);
-          state.selectNote(full);
-          if (context.mounted) {
-            Navigator.push(context, MaterialPageRoute(
-              builder: (_) => ChangeNotifierProvider.value(
-                value: state,
-                child: NoteEditorScreen(note: full))));
-          }
-        },
-        onDelete: (note) => state.deleteNote(note.id),
-      ),
       floatingActionButton: FloatingActionButton(
         backgroundColor: const Color(0xFF6366F1),
         foregroundColor: Colors.white,
@@ -202,6 +210,33 @@ class _NotesHeader extends StatelessWidget {
         )),
       ],
     ));
+  }
+}
+
+class _OfflineBanner extends StatelessWidget {
+  final String? message;
+  const _OfflineBanner({this.message});
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Material(
+      color: scheme.secondaryContainer,
+      child: SafeArea(
+        bottom: false,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+          child: Row(children: [
+            Icon(Icons.cloud_off, size: 16, color: scheme.onSecondaryContainer),
+            const SizedBox(width: 8),
+            Expanded(child: Text(
+              message ?? 'Offline mode — backend unavailable',
+              style: TextStyle(fontSize: 12, color: scheme.onSecondaryContainer),
+            )),
+          ]),
+        ),
+      ),
+    );
   }
 }
 

@@ -6,12 +6,20 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'api_client.dart' as api;
 import 'local_note_service.dart';
 import 'sync_service.dart';
+import '../data/models/note.dart' as local;
+import '../data/models/notebook.dart' as local;
+
+typedef ApiClientFactory = api.ApiClient Function(String baseUrl);
 
 class AppState extends ChangeNotifier {
   final LocalNoteService _localService;
+  final ApiClientFactory _clientFactory;
 
   String _apiUrl = 'http://127.0.0.1:8766';
   bool _isConnected = false;
+  bool _isBackendAvailable = false;
+  String? _backendErrorMessage;
+  bool _hasLocalData = false;
   bool _isLoading = false;
   bool _isSyncing = false;
   String? _syncMessage;
@@ -21,11 +29,18 @@ class AppState extends ChangeNotifier {
   api.Notebook? _selectedNotebook;
   api.Note? _selectedNote;
 
-  AppState({LocalNoteService? localService})
-      : _localService = localService ?? LocalNoteService();
+  AppState({
+    LocalNoteService? localService,
+    ApiClientFactory? clientFactory,
+  })  : _localService = localService ?? LocalNoteService(),
+        _clientFactory =
+            clientFactory ?? ((baseUrl) => api.ApiClient(baseUrl: baseUrl));
 
   String get apiUrl => _apiUrl;
   bool get isConnected => _isConnected;
+  bool get isBackendAvailable => _isBackendAvailable;
+  String? get backendErrorMessage => _backendErrorMessage;
+  bool get hasLocalData => _hasLocalData;
   bool get isLoading => _isLoading;
   bool get isSyncing => _isSyncing;
   String? get syncMessage => _syncMessage;
@@ -34,7 +49,7 @@ class AppState extends ChangeNotifier {
   List<api.Note> get notes => _notes;
   api.Notebook? get selectedNotebook => _selectedNotebook;
   api.Note? get selectedNote => _selectedNote;
-  api.ApiClient get client => api.ApiClient(baseUrl: _apiUrl);
+  api.ApiClient get client => _clientFactory(_apiUrl);
 
   /// Single entry point for local persistence. Screens that need to read or
   /// write notebooks, notes, or strokes from the on-device SQLite store go
@@ -59,13 +74,74 @@ class AppState extends ChangeNotifier {
     }
     _isLoading = true;
     notifyListeners();
+
     try {
       _isConnected = await client.ping();
-      if (_isConnected) { await loadNotebooks(); await loadNotes(); }
-    } catch (_) { _isConnected = false; }
+    } catch (_) {
+      _isConnected = false;
+    }
+
+    _isBackendAvailable = _isConnected;
+    if (_isConnected) {
+      _backendErrorMessage = null;
+      try {
+        await loadNotebooks();
+        await loadNotes();
+      } catch (e) {
+        _isBackendAvailable = false;
+        _backendErrorMessage = 'Offline mode — backend unavailable';
+        await _loadLocalFallback();
+      }
+    } else {
+      _backendErrorMessage = 'Offline mode — backend unavailable';
+      await _loadLocalFallback();
+    }
+
     _isLoading = false;
     notifyListeners();
   }
+
+  /// Populates [_notebooks] and [_notes] from the local SQLite store so the
+  /// UI can keep working when the backend cannot be reached.
+  Future<void> _loadLocalFallback() async {
+    try {
+      if (!_localService.isInitialized) {
+        await _localService.initialize();
+      }
+      final snapshot = await _localService.exportAllData();
+      _notebooks = snapshot.notebooks.map(_toApiNotebook).toList();
+      _notes = snapshot.notes
+          .where((n) => !n.isDeleted)
+          .map(_toApiNote)
+          .toList();
+      _hasLocalData = _notebooks.isNotEmpty || _notes.isNotEmpty;
+    } catch (_) {
+      _notebooks = [];
+      _notes = [];
+      _hasLocalData = false;
+    }
+  }
+
+  api.Notebook _toApiNotebook(local.Notebook n) => api.Notebook(
+        id: n.id,
+        name: n.name,
+        color: n.color,
+        icon: n.icon,
+        updatedAt: n.updatedAt.toIso8601String(),
+      );
+
+  api.Note _toApiNote(local.Note n) => api.Note(
+        id: n.id,
+        title: n.title,
+        noteType: n.noteType,
+        notebookId: n.notebookId,
+        tags: n.tags,
+        isPinned: n.isPinned,
+        isDeleted: n.isDeleted,
+        pageCount: 1,
+        updatedAt: n.updatedAt.toIso8601String(),
+        createdAt: n.createdAt.toIso8601String(),
+      );
 
   Future<void> loadNotebooks() async {
     _notebooks = await client.getNotebooks();

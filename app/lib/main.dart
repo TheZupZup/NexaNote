@@ -31,7 +31,11 @@ class NexaNoteApp extends StatelessWidget {
           if (state.isLoading) {
             return const _SplashScreen();
           }
-          if (!state.isConnected) {
+          // When the backend is unreachable but the device has local data,
+          // route the user straight to the home screen so they can keep
+          // working offline. ConnectScreen is reserved for first-launch
+          // setup, when there is nothing local to fall back to.
+          if (!state.isBackendAvailable && !state.hasLocalData) {
             return const ConnectScreen();
           }
           return const HomeScreen();
