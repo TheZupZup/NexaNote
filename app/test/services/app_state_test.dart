@@ -9,8 +9,16 @@ import 'package:nexanote/services/local_note_service.dart';
 import 'package:nexanote/services/sync_service.dart';
 
 class _StubApi extends api.ApiClient {
-  _StubApi({this.shouldThrow = false}) : super(baseUrl: 'http://stub.test');
+  _StubApi({this.shouldThrow = false, this.pingResult = true})
+      : super(baseUrl: 'http://stub.test');
   final bool shouldThrow;
+  final bool pingResult;
+
+  @override
+  Future<bool> ping() async {
+    if (shouldThrow) throw Exception('unreachable');
+    return pingResult;
+  }
 
   @override
   Future<List<api.Notebook>> getNotebooks() async {
@@ -84,6 +92,45 @@ void main() {
     expect(state.syncError, isNull);
     expect(state.syncMessage, isNotNull);
     expect(state.syncMessage, contains('Sync complete'));
+  });
+
+  test('connect falls back to local data when the backend is unreachable',
+      () async {
+    await state.initLocal();
+    final localNb = await state.localService.createNotebook('Offline NB');
+    await state.localService.createNote(
+      'Local note',
+      notebookId: localNb.id,
+    );
+
+    final offlineState = AppState(
+      localService: service,
+      clientFactory: (_) => _StubApi(shouldThrow: true),
+    );
+
+    await offlineState.connect();
+
+    expect(offlineState.isBackendAvailable, isFalse);
+    expect(offlineState.isConnected, isFalse);
+    expect(offlineState.backendErrorMessage, isNotNull);
+    expect(offlineState.backendErrorMessage, contains('Offline'));
+    expect(offlineState.hasLocalData, isTrue);
+    expect(offlineState.notebooks.map((n) => n.name), contains('Offline NB'));
+    expect(offlineState.notes.map((n) => n.title), contains('Local note'));
+  });
+
+  test('connect marks backend as available when ping succeeds', () async {
+    await state.initLocal();
+    final onlineState = AppState(
+      localService: service,
+      clientFactory: (_) => _StubApi(),
+    );
+
+    await onlineState.connect();
+
+    expect(onlineState.isBackendAvailable, isTrue);
+    expect(onlineState.isConnected, isTrue);
+    expect(onlineState.backendErrorMessage, isNull);
   });
 
   test('syncNow records syncError and resets isSyncing when sync fails',
