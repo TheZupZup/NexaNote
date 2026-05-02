@@ -19,6 +19,7 @@ class AppState extends ChangeNotifier {
   bool _isConnected = false;
   bool _isBackendAvailable = false;
   String? _backendErrorMessage;
+  String? _lastConnectError;
   bool _hasLocalData = false;
   bool _isLoading = false;
   bool _isSyncing = false;
@@ -41,6 +42,7 @@ class AppState extends ChangeNotifier {
   bool get isConnected => _isConnected;
   bool get isBackendAvailable => _isBackendAvailable;
   String? get backendErrorMessage => _backendErrorMessage;
+  String? get lastConnectError => _lastConnectError;
   bool get hasLocalData => _hasLocalData;
   bool get isLoading => _isLoading;
   bool get isSyncing => _isSyncing;
@@ -79,8 +81,13 @@ class AppState extends ChangeNotifier {
 
     try {
       _isConnected = await client.ping();
-    } catch (_) {
+      if (_isConnected) _lastConnectError = null;
+    } catch (e) {
       _isConnected = false;
+      _lastConnectError = _safeErrorString(e);
+    }
+    if (!_isConnected && _lastConnectError == null) {
+      _lastConnectError = 'Ping returned false (server unreachable)';
     }
 
     _isBackendAvailable = _isConnected;
@@ -290,6 +297,15 @@ class AppState extends ChangeNotifier {
       await _loadLocalFallback();
     }
     notifyListeners();
+  }
+
+  /// Stringifies an error for diagnostics without leaking credentials. Errors
+  /// from the API client may include the request URL, which can carry tokens
+  /// or query strings; we strip everything past the first whitespace block to
+  /// keep the message short and predictable.
+  String _safeErrorString(Object e) {
+    final raw = e.toString();
+    return raw.length > 500 ? '${raw.substring(0, 500)}…' : raw;
   }
 
   void _beginSync() {

@@ -2,8 +2,10 @@
 // Écran de connexion au backend — affiché au premier lancement
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import '../services/app_state.dart';
+import '../services/connection_diagnostics.dart';
 
 class ConnectScreen extends StatefulWidget {
   const ConnectScreen({super.key});
@@ -16,6 +18,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
   final _controller = TextEditingController(text: 'http://127.0.0.1:8766');
   bool _connecting = false;
   String? _error;
+  bool _showDetails = false;
 
   Future<void> _connect() async {
     setState(() { _connecting = true; _error = null; });
@@ -87,18 +90,73 @@ class _ConnectScreenState extends State<ConnectScreen> {
                       color: scheme.errorContainer,
                       borderRadius: BorderRadius.circular(8),
                     ),
-                    child: Row(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Icon(Icons.warning_amber_rounded,
-                            color: scheme.onErrorContainer, size: 18),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: Text(
-                            _error!,
-                            style: TextStyle(
-                                color: scheme.onErrorContainer, fontSize: 13),
-                          ),
+                        Row(
+                          children: [
+                            Icon(Icons.warning_amber_rounded,
+                                color: scheme.onErrorContainer, size: 18),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                _error!,
+                                style: TextStyle(
+                                    color: scheme.onErrorContainer,
+                                    fontSize: 13),
+                              ),
+                            ),
+                          ],
                         ),
+                        const SizedBox(height: 8),
+                        Row(
+                          children: [
+                            TextButton.icon(
+                              onPressed: _copyDiagnostics,
+                              icon: Icon(Icons.copy,
+                                  size: 14, color: scheme.onErrorContainer),
+                              label: Text('Copy diagnostics',
+                                  style: TextStyle(
+                                      color: scheme.onErrorContainer,
+                                      fontSize: 12)),
+                              style: TextButton.styleFrom(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 8, vertical: 0),
+                                minimumSize: const Size(0, 28),
+                                tapTargetSize:
+                                    MaterialTapTargetSize.shrinkWrap,
+                              ),
+                            ),
+                            TextButton(
+                              onPressed: () =>
+                                  setState(() => _showDetails = !_showDetails),
+                              style: TextButton.styleFrom(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 8, vertical: 0),
+                                minimumSize: const Size(0, 28),
+                                tapTargetSize:
+                                    MaterialTapTargetSize.shrinkWrap,
+                              ),
+                              child: Text(
+                                  _showDetails
+                                      ? 'Hide details'
+                                      : 'Show details',
+                                  style: TextStyle(
+                                      color: scheme.onErrorContainer,
+                                      fontSize: 12)),
+                            ),
+                          ],
+                        ),
+                        if (_showDetails) ...[
+                          const SizedBox(height: 6),
+                          SelectableText(
+                            _buildDiagnostics().format(),
+                            style: TextStyle(
+                                fontFamily: 'monospace',
+                                fontSize: 11,
+                                color: scheme.onErrorContainer),
+                          ),
+                        ],
                       ],
                     ),
                   ),
@@ -160,6 +218,26 @@ class _ConnectScreenState extends State<ConnectScreen> {
             ),
           ),
         ),
+      ),
+    );
+  }
+
+  ConnectionDiagnostics _buildDiagnostics() {
+    final state = context.read<AppState>();
+    return ConnectionDiagnostics.capture(
+      serverUrl: _controller.text.trim(),
+      errorMessage: state.lastConnectError,
+    );
+  }
+
+  Future<void> _copyDiagnostics() async {
+    final text = _buildDiagnostics().format();
+    await Clipboard.setData(ClipboardData(text: text));
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Diagnostics copied'),
+        duration: Duration(seconds: 2),
       ),
     );
   }
