@@ -30,7 +30,6 @@ All design decisions and direction are fully human-driven.
 - Handwriting OCR
 - Page templates (lined, grid, dotted)
 - End-to-end encryption
-- Docker deployment
 
 See [docs/android-roadmap.md](docs/android-roadmap.md) for the full Android & S26 Ultra plan.
 
@@ -103,6 +102,17 @@ bash ~/NexaNote/nexanote.sh
 
 This script starts the backend and the app automatically.
 
+### Run the backend with Docker
+
+Prefer to run the backend persistently on a NAS or always-on machine?
+
+```bash
+docker compose up -d --build
+```
+
+This starts the backend on ports `8766` (API) and `8765` (WebDAV), with data
+persisted in `./data`. See [docs/docker.md](docs/docker.md) for the full guide.
+
 ---
 
 ## Sync with your NAS
@@ -131,7 +141,6 @@ The project is in early development. Contributions are welcome.
 |------|-----------|
 | Android app (Flutter) | Hard |
 | PDF export | Medium |
-| Docker / docker-compose | Easy |
 | Page templates | Easy |
 | Handwriting OCR | Hard |
 | End-to-end encryption | Hard |
