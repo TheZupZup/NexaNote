@@ -42,6 +42,8 @@ class _DesktopLayout extends StatelessWidget {
           onSync: () => _sync(context),
           isSyncing: state.isSyncing,
           hasSyncError: state.syncError != null,
+          syncError: state.syncError,
+          lastSyncTime: state.lastSyncTime,
         )),
         VerticalDivider(width: 1, color: scheme.outlineVariant),
         SizedBox(width: 300, child: Column(children: [
@@ -165,6 +167,8 @@ class _MobileLayout extends StatelessWidget {
         },
         isSyncing: state.isSyncing,
         hasSyncError: state.syncError != null,
+        syncError: state.syncError,
+        lastSyncTime: state.lastSyncTime,
       )),
       floatingActionButton: FloatingActionButton(
         backgroundColor: const Color(0xFF6366F1),

@@ -93,6 +93,16 @@ void main() {
     expect(state.syncError, isNull);
     expect(state.syncMessage, isNotNull);
     expect(state.syncMessage, contains('Sync complete'));
+    expect(state.lastSyncTime, isNotNull);
+  });
+
+  test('lastSyncTime is not set when sync fails', () async {
+    await state.initLocal();
+    final svc = SyncService(apiClient: _StubApi(shouldThrow: true), local: service);
+
+    expect(state.lastSyncTime, isNull);
+    await expectLater(state.syncNow(service: svc), throwsA(isA<Exception>()));
+    expect(state.lastSyncTime, isNull);
   });
 
   test('connect falls back to local data when the backend is unreachable',

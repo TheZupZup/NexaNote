@@ -12,6 +12,8 @@ class NotebookSidebar extends StatelessWidget {
   final VoidCallback onSync;
   final bool isSyncing;
   final bool hasSyncError;
+  final String? syncError;
+  final DateTime? lastSyncTime;
 
   const NotebookSidebar({
     super.key,
@@ -22,7 +24,40 @@ class NotebookSidebar extends StatelessWidget {
     required this.onSync,
     this.isSyncing = false,
     this.hasSyncError = false,
+    this.syncError,
+    this.lastSyncTime,
   });
+
+  static String _formatRelative(DateTime time, {DateTime? now}) {
+    final delta = (now ?? DateTime.now()).difference(time);
+    if (delta.inSeconds < 60) return 'just now';
+    if (delta.inMinutes < 60) {
+      final m = delta.inMinutes;
+      return '$m minute${m == 1 ? '' : 's'} ago';
+    }
+    if (delta.inHours < 24) {
+      final h = delta.inHours;
+      return '$h hour${h == 1 ? '' : 's'} ago';
+    }
+    final d = delta.inDays;
+    return '$d day${d == 1 ? '' : 's'} ago';
+  }
+
+  @visibleForTesting
+  static String buildSyncTooltip({
+    required bool isSyncing,
+    required bool hasSyncError,
+    String? syncError,
+    DateTime? lastSyncTime,
+    DateTime? now,
+  }) {
+    if (isSyncing) return 'Syncing...';
+    if (hasSyncError) {
+      return syncError ?? 'Last sync failed — tap to retry';
+    }
+    if (lastSyncTime == null) return 'Not synced yet';
+    return 'Last synced: ${_formatRelative(lastSyncTime, now: now)}';
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -65,11 +100,12 @@ class NotebookSidebar extends StatelessWidget {
                         color: hasSyncError ? Colors.red : null,
                       ),
                 onPressed: isSyncing ? null : onSync,
-                tooltip: isSyncing
-                    ? 'Syncing…'
-                    : hasSyncError
-                        ? 'Last sync failed — tap to retry'
-                        : 'Sync',
+                tooltip: buildSyncTooltip(
+                  isSyncing: isSyncing,
+                  hasSyncError: hasSyncError,
+                  syncError: syncError,
+                  lastSyncTime: lastSyncTime,
+                ),
                 visualDensity: VisualDensity.compact,
               ),
             ],
