@@ -130,6 +130,37 @@ void main() {
     expect(offlineState.notes.map((n) => n.title), contains('Local note'));
   });
 
+  test('connect stores a diagnostic-safe error when ping throws', () async {
+    await state.initLocal();
+    final offlineState = AppState(
+      localService: service,
+      clientFactory: (_) => _StubApi(shouldThrow: true),
+    );
+
+    await offlineState.connect();
+
+    expect(offlineState.isConnected, isFalse);
+    expect(offlineState.lastConnectError, isNotNull);
+    expect(offlineState.lastConnectError, contains('unreachable'));
+    // Should not contain anything that looks credential-shaped.
+    final lower = offlineState.lastConnectError!.toLowerCase();
+    expect(lower, isNot(contains('password')));
+    expect(lower, isNot(contains('token')));
+  });
+
+  test('connect clears lastConnectError on successful ping', () async {
+    await state.initLocal();
+    final stub = _StubApi(shouldThrow: true);
+    final s = AppState(localService: service, clientFactory: (_) => stub);
+
+    await s.connect();
+    expect(s.lastConnectError, isNotNull);
+
+    stub.shouldThrow = false;
+    await s.connect();
+    expect(s.lastConnectError, isNull);
+  });
+
   test('connect marks backend as available when ping succeeds', () async {
     await state.initLocal();
     final onlineState = AppState(
