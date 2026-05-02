@@ -144,22 +144,37 @@ class AppState extends ChangeNotifier {
       );
 
   Future<void> loadNotebooks() async {
-    _notebooks = await client.getNotebooks();
-    notifyListeners();
+    try {
+      _notebooks = await client.getNotebooks();
+      notifyListeners();
+    } catch (e) {
+      await _handleBackendFailure(e);
+      rethrow;
+    }
   }
 
   Future<api.Notebook> createNotebook(String name, String color) async {
-    final nb = await client.createNotebook(name: name, color: color);
-    _notebooks.insert(0, nb);
-    notifyListeners();
-    return nb;
+    try {
+      final nb = await client.createNotebook(name: name, color: color);
+      _notebooks.insert(0, nb);
+      notifyListeners();
+      return nb;
+    } catch (e) {
+      await _handleBackendFailure(e);
+      rethrow;
+    }
   }
 
   Future<void> deleteNotebook(String id) async {
-    await client.deleteNotebook(id);
-    _notebooks.removeWhere((n) => n.id == id);
-    if (_selectedNotebook?.id == id) { _selectedNotebook = null; _notes = []; }
-    notifyListeners();
+    try {
+      await client.deleteNotebook(id);
+      _notebooks.removeWhere((n) => n.id == id);
+      if (_selectedNotebook?.id == id) { _selectedNotebook = null; _notes = []; }
+      notifyListeners();
+    } catch (e) {
+      await _handleBackendFailure(e);
+      rethrow;
+    }
   }
 
   void selectNotebook(api.Notebook? nb) {
@@ -171,35 +186,58 @@ class AppState extends ChangeNotifier {
   Future<void> loadNotes({String? notebookId, String? search}) async {
     _isLoading = true;
     notifyListeners();
-    try { _notes = await client.getNotes(notebookId: notebookId, search: search); }
-    catch (_) {}
+    try {
+      _notes = await client.getNotes(notebookId: notebookId, search: search);
+    } catch (e) {
+      await _handleBackendFailure(e);
+    }
     _isLoading = false;
     notifyListeners();
   }
 
   Future<api.Note> createNote({required String title, required String noteType, String template = 'blank'}) async {
-    final note = await client.createNote(
-      title: title, noteType: noteType,
-      notebookId: _selectedNotebook?.id, template: template);
-    _notes.insert(0, note);
-    notifyListeners();
-    return note;
+    try {
+      final note = await client.createNote(
+        title: title, noteType: noteType,
+        notebookId: _selectedNotebook?.id, template: template);
+      _notes.insert(0, note);
+      notifyListeners();
+      return note;
+    } catch (e) {
+      await _handleBackendFailure(e);
+      rethrow;
+    }
   }
 
   Future<void> deleteNote(String id) async {
-    await client.deleteNote(id);
-    _notes.removeWhere((n) => n.id == id);
-    if (_selectedNote?.id == id) _selectedNote = null;
-    notifyListeners();
+    try {
+      await client.deleteNote(id);
+      _notes.removeWhere((n) => n.id == id);
+      if (_selectedNote?.id == id) _selectedNote = null;
+      notifyListeners();
+    } catch (e) {
+      await _handleBackendFailure(e);
+      rethrow;
+    }
   }
 
   Future<void> updateNoteTitle(String id, String title) async {
-    await client.updateNote(id, title: title);
-    await loadNotes(notebookId: _selectedNotebook?.id);
+    try {
+      await client.updateNote(id, title: title);
+      await loadNotes(notebookId: _selectedNotebook?.id);
+    } catch (e) {
+      await _handleBackendFailure(e);
+      rethrow;
+    }
   }
 
   Future<void> savePageText(String noteId, int pageNum, String content) async {
-    await client.savePageText(noteId, pageNum, content);
+    try {
+      await client.savePageText(noteId, pageNum, content);
+    } catch (e) {
+      await _handleBackendFailure(e);
+      rethrow;
+    }
   }
 
   void selectNote(api.Note? note) { _selectedNote = note; notifyListeners(); }
@@ -214,6 +252,7 @@ class AppState extends ChangeNotifier {
     } catch (e) {
       final message = 'Sync failed: $e';
       _finishSync(error: message);
+      await _handleBackendFailure(e);
       return message;
     }
   }
@@ -232,8 +271,23 @@ class AppState extends ChangeNotifier {
       return result;
     } catch (e) {
       _finishSync(error: 'Sync failed: $e');
+      await _handleBackendFailure(e);
       rethrow;
     }
+  }
+
+  /// Marks the backend as unavailable after an API call fails mid-session and
+  /// refreshes [_notebooks]/[_notes] from the local SQLite store so the UI can
+  /// keep working offline. Reuses the same flag and message as the
+  /// startup-time path so the existing offline banner kicks in unchanged.
+  Future<void> _handleBackendFailure(Object _) async {
+    final wasAvailable = _isBackendAvailable;
+    _isBackendAvailable = false;
+    _backendErrorMessage = 'Offline mode — backend unavailable';
+    if (wasAvailable) {
+      await _loadLocalFallback();
+    }
+    notifyListeners();
   }
 
   void _beginSync() {

@@ -9,9 +9,10 @@ import 'package:nexanote/services/local_note_service.dart';
 import 'package:nexanote/services/sync_service.dart';
 
 class _StubApi extends api.ApiClient {
-  _StubApi({this.shouldThrow = false, this.pingResult = true})
-      : super(baseUrl: 'http://stub.test');
-  final bool shouldThrow;
+  _StubApi({bool shouldThrow = false, this.pingResult = true})
+      : shouldThrow = shouldThrow,
+        super(baseUrl: 'http://stub.test');
+  bool shouldThrow;
   final bool pingResult;
 
   @override
@@ -131,6 +132,67 @@ void main() {
     expect(onlineState.isBackendAvailable, isTrue);
     expect(onlineState.isConnected, isTrue);
     expect(onlineState.backendErrorMessage, isNull);
+  });
+
+  test('backend failure mid-session flips isBackendAvailable from true to false',
+      () async {
+    await state.initLocal();
+    final localNb = await service.createNotebook('Local NB');
+    await service.createNote('Local note', notebookId: localNb.id);
+
+    final stub = _StubApi();
+    final liveState = AppState(
+      localService: service,
+      clientFactory: (_) => stub,
+    );
+
+    await liveState.connect();
+    expect(liveState.isBackendAvailable, isTrue);
+    expect(liveState.backendErrorMessage, isNull);
+
+    // Simulate the backend going down mid-session.
+    stub.shouldThrow = true;
+    await expectLater(liveState.loadNotebooks(), throwsA(isA<Exception>()));
+
+    expect(liveState.isBackendAvailable, isFalse);
+    expect(liveState.backendErrorMessage, isNotNull);
+    expect(liveState.backendErrorMessage, contains('Offline'));
+    // Local data is still reachable so the UI does not bounce back to
+    // ConnectScreen and the editor keeps working.
+    expect(liveState.hasLocalData, isTrue);
+    expect(liveState.notebooks.map((n) => n.name), contains('Local NB'));
+    expect(liveState.notes.map((n) => n.title), contains('Local note'));
+
+    // SQLite save/load keeps working independently of the backend flag.
+    await liveState.localService.createNote('Written offline',
+        notebookId: localNb.id);
+    final notes =
+        await liveState.localService.getNotesForNotebook(localNb.id);
+    expect(notes.map((n) => n.title), contains('Written offline'));
+  });
+
+  test('syncNow marks backend unavailable when sync fails mid-session',
+      () async {
+    await state.initLocal();
+    final stub = _StubApi();
+    final liveState = AppState(
+      localService: service,
+      clientFactory: (_) => stub,
+    );
+
+    await liveState.connect();
+    expect(liveState.isBackendAvailable, isTrue);
+
+    stub.shouldThrow = true;
+    final svc = SyncService(apiClient: stub, local: service);
+    await expectLater(
+        liveState.syncNow(service: svc), throwsA(isA<Exception>()));
+
+    expect(liveState.isSyncing, isFalse);
+    expect(liveState.syncError, isNotNull);
+    expect(liveState.syncError, contains('Sync failed'));
+    expect(liveState.isBackendAvailable, isFalse);
+    expect(liveState.backendErrorMessage, contains('Offline'));
   });
 
   test('syncNow records syncError and resets isSyncing when sync fails',
