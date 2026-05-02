@@ -24,6 +24,7 @@ class AppState extends ChangeNotifier {
   bool _isSyncing = false;
   String? _syncMessage;
   String? _syncError;
+  DateTime? _lastSyncTime;
   List<api.Notebook> _notebooks = [];
   List<api.Note> _notes = [];
   api.Notebook? _selectedNotebook;
@@ -45,6 +46,7 @@ class AppState extends ChangeNotifier {
   bool get isSyncing => _isSyncing;
   String? get syncMessage => _syncMessage;
   String? get syncError => _syncError;
+  DateTime? get lastSyncTime => _lastSyncTime;
   List<api.Notebook> get notebooks => _notebooks;
   List<api.Note> get notes => _notes;
   api.Notebook? get selectedNotebook => _selectedNotebook;
@@ -301,6 +303,9 @@ class AppState extends ChangeNotifier {
     _isSyncing = false;
     _syncMessage = message;
     _syncError = error;
+    if (error == null) {
+      _lastSyncTime = DateTime.now();
+    }
     notifyListeners();
   }
 }
