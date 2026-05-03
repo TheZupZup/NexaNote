@@ -722,15 +722,23 @@ class NexaNoteSyncEngine:
         if note.notebook_id:
             notebook = self.db.get_notebook(note.notebook_id)
 
-        if notebook:
-            nb_slug = _notebook_to_slug(notebook)
-        else:
-            # EN: Notes without a notebook go into the default fallback folder.
-            # FR: Les notes sans carnet sont placées dans le dossier de repli par défaut.
-            nb_slug = DEFAULT_NOTEBOOK_SLUG
-            logger.debug(f"Note {note.title!r} has no notebook → using '{nb_slug}' folder")
-
-        note_slug = _note_to_slug(note)
+        try:
+            if notebook:
+                nb_slug = _notebook_to_slug(notebook)
+            else:
+                # EN: Notes without a notebook go into the default fallback folder.
+                # FR: Les notes sans carnet sont placées dans le dossier de repli par défaut.
+                nb_slug = DEFAULT_NOTEBOOK_SLUG
+                logger.debug(f"Note {note.title!r} has no notebook → using '{nb_slug}' folder")
+            note_slug = _note_to_slug(note)
+        except Exception as exc:
+            # Slug computation only fails on truly malformed notes (e.g.
+            # missing id), but if it ever does we want a useful reason
+            # instead of a raw traceback bubbling up to the sync report.
+            msg = f"path generation failed: {type(exc).__name__}: {exc}"
+            logger.exception("Could not compute push path for note %s", note.id)
+            report.errors.append(f"Échec partiel push : {note.title} — {msg}")
+            return
 
         # Créer le dossier carnet sur le serveur si nécessaire
         nb_entries = self.client.list_notebooks()
@@ -745,17 +753,37 @@ class NexaNoteSyncEngine:
             self.client.create_note_dir(nb_slug, note_slug)
 
         # PUT note.json
+        try:
+            meta_payload = _serialize_note_meta(note)
+        except Exception as exc:
+            logger.exception("note.json serialization failed for %s", note.id)
+            reason = f"note.json: serialization failed: {type(exc).__name__}: {exc}"
+            report.errors.append(f"Échec partiel push : {note.title} — {reason}")
+            return
         meta_ok, meta_reason = self.client.put_note_meta(
-            nb_slug, note_slug, _serialize_note_meta(note)
+            nb_slug, note_slug, meta_payload
         )
 
         # PUT page_N.ink pour chaque page
         pages_ok = True
         page_reasons: list[str] = []
         for page in note.pages:
+            try:
+                ink_payload = _serialize_ink_page(page)
+            except Exception as exc:
+                logger.exception(
+                    "page_%d.ink serialization failed for note %s",
+                    page.page_number,
+                    note.id,
+                )
+                pages_ok = False
+                page_reasons.append(
+                    f"page {page.page_number}: serialization failed: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                continue
             ok, page_reason = self.client.put_ink_page(
-                nb_slug, note_slug, page.page_number,
-                _serialize_ink_page(page)
+                nb_slug, note_slug, page.page_number, ink_payload,
             )
             if not ok:
                 pages_ok = False

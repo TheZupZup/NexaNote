@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from cheroot import wsgi as cheroot_wsgi
 
-from nexanote.models.note import Note, Notebook, NoteType
+from nexanote.models.note import Note, Notebook, NoteType, SyncStatus
 from nexanote.storage import FileNoteStore
 from nexanote.sync.client import (
     DEFAULT_NOTEBOOK_SLUG,
@@ -37,6 +37,7 @@ from nexanote.sync.server import (
     build_app,
     ensure_default_notebook,
     ensure_storage_layout,
+    seed_demo_data,
 )
 from nexanote.sync.webdav_provider import (
     NexaNoteDAVProvider,
@@ -508,3 +509,257 @@ class TestWriterErrorReporting:
         writer.write(b"{ this is not json")
         with pytest.raises(DAVError):
             writer.close()
+
+
+# ---------------------------------------------------------------------------
+# Welcome / demo note sync — the previously-failing 500 case
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def live_server_with_demo(tmp_path):
+    """
+    Live WebDAV server bootstrapped exactly like ``run_server`` first launch:
+    fallback notebook + seeded demo content (notebook + welcome note).
+    Mirrors the production path that produced the welcome-note 500 report.
+    """
+    db = FileNoteStore(tmp_path / "demo_server")
+    ensure_storage_layout(db)
+    ensure_default_notebook(db)
+    seeded = seed_demo_data(db)
+    assert seeded is not None, "seed_demo_data must produce a note on first run"
+
+    app = build_app(db, username="user", password="pass", verbose=False)
+    port = _free_port()
+    server = cheroot_wsgi.Server(
+        bind_addr=("127.0.0.1", port),
+        wsgi_app=app,
+        numthreads=4,
+        request_queue_size=8,
+    )
+    thread = threading.Thread(target=server.start, daemon=True)
+    thread.start()
+
+    base_url = f"http://127.0.0.1:{port}/"
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        try:
+            requests.options(base_url, timeout=1)
+            break
+        except requests.RequestException:
+            time.sleep(0.05)
+    else:
+        server.stop()
+        raise RuntimeError("test WebDAV server failed to start")
+
+    yield {
+        "url": base_url,
+        "username": "user",
+        "password": "pass",
+        "db": db,
+        "demo_note": seeded,
+    }
+
+    server.stop()
+    db.close()
+
+
+class TestDemoSeed:
+    """
+    Demo data must be created in a state that survives a full sync round-trip
+    without ever round-tripping through a 500. The bug being fixed: a fresh
+    server with seeded demo data triggered a partial-push failure on the
+    welcome note when a sync engine ran against the same data dir.
+    """
+
+    def test_seed_demo_marks_data_synced(self, tmp_path):
+        # Demo data must be SYNCED so a sync engine sharing the data dir
+        # never tries to push it back to itself.
+        db = FileNoteStore(tmp_path / "seed")
+        ensure_default_notebook(db)
+        note = seed_demo_data(db)
+        assert note is not None
+        assert note.sync_status == SyncStatus.SYNCED
+
+        notebook = db.get_notebook(note.notebook_id)
+        assert notebook is not None
+        assert notebook.sync_status == SyncStatus.SYNCED
+
+    def test_seed_demo_is_idempotent(self, tmp_path):
+        db = FileNoteStore(tmp_path / "seed2")
+        ensure_default_notebook(db)
+        first = seed_demo_data(db)
+        assert first is not None
+        second = seed_demo_data(db)
+        # Second call sees the user notebook and bails out — no duplication.
+        assert second is None
+        notebooks = [
+            nb for nb in db.list_notebooks()
+            if not nb.id.startswith(DEFAULT_NOTEBOOK_ID_PREFIX)
+        ]
+        assert len(notebooks) == 1
+
+
+class TestWelcomeNoteSync:
+    def test_self_sync_does_not_repush_demo_note(self, live_server_with_demo):
+        """
+        EN: When the same data dir backs both the WebDAV server and a sync
+            engine (the layout used by ``python main.py``), the seeded
+            welcome note must not be picked up for push. Previously its
+            LOCAL_ONLY status caused the engine to PUT note.json + page_1.ink
+            against itself, and any failure surfaced as a useless 500.
+        """
+        engine = NexaNoteSyncEngine(
+            live_server_with_demo["db"],
+            SyncConfig(
+                server_url=live_server_with_demo["url"],
+                username=live_server_with_demo["username"],
+                password=live_server_with_demo["password"],
+                timeout_seconds=5,
+            ),
+        )
+        report = engine.sync()
+        assert report.success(), f"self-sync should be a no-op: {report.errors}"
+        assert report.notes_pushed == 0, (
+            f"seeded demo data must stay put on self-sync, got {report.notes_pushed}"
+        )
+
+    def test_fresh_client_pulls_welcome_note_as_synced(
+        self, live_server_with_demo, tmp_path
+    ):
+        """
+        EN: A fresh client pulling from a server with seeded demo content
+            must receive the welcome note locally, marked SYNCED. A second
+            sync against an unchanged server must be a no-op — nothing to
+            push, nothing to pull.
+        """
+        client_db = FileNoteStore(tmp_path / "client_welcome")
+        engine = NexaNoteSyncEngine(
+            client_db,
+            SyncConfig(
+                server_url=live_server_with_demo["url"],
+                username=live_server_with_demo["username"],
+                password=live_server_with_demo["password"],
+                timeout_seconds=5,
+            ),
+        )
+
+        # 1) Pull — welcome note arrives locally with SYNCED status.
+        report = engine.sync()
+        assert report.success(), f"pull failed: {report.errors}"
+        assert report.notes_pulled == 1
+        assert report.notes_pushed == 0
+
+        demo_id = live_server_with_demo["demo_note"].id
+        local = client_db.get_note(demo_id, load_pages=True)
+        assert local is not None, "welcome note should be pulled to client"
+        assert local.title == live_server_with_demo["demo_note"].title
+        assert local.sync_status == SyncStatus.SYNCED
+        assert local.pages and local.pages[0].typed_content
+
+        # 2) Second sync — fully steady-state, no spurious push of the
+        # demo note (which would have triggered the 500 in the bug report).
+        steady = engine.sync()
+        assert steady.success(), f"steady-state sync errors: {steady.errors}"
+        assert steady.notes_pushed == 0
+
+    def test_welcome_note_push_from_fresh_client_to_empty_server(
+        self, live_server, tmp_path
+    ):
+        """
+        EN: A separate scenario: the client locally creates a welcome note
+            (e.g. on first launch) and pushes to a server that doesn't yet
+            have one. Title/path must serialize and travel without a 500.
+            Title is taken from the seeded demo so the test isn't pinned
+            to a hardcoded literal.
+        """
+        seed_db = FileNoteStore(tmp_path / "seed_for_title")
+        ensure_default_notebook(seed_db)
+        seeded = seed_demo_data(seed_db)
+        assert seeded is not None
+        welcome_title = seeded.title
+
+        client_db = FileNoteStore(tmp_path / "client_fresh_welcome")
+        nb = Notebook(name="Mon premier carnet", color="#6366f1")
+        client_db.save_notebook(nb)
+        note = Note(
+            notebook_id=nb.id,
+            title=welcome_title,
+            note_type=NoteType.TYPED,
+        )
+        page = note.add_page(template="lined")
+        page.typed_content = (
+            f"# {welcome_title}\n\nCette note a été créée automatiquement.\n"
+        )
+        client_db.save_note(note)
+
+        engine = NexaNoteSyncEngine(
+            client_db,
+            SyncConfig(
+                server_url=live_server["url"],
+                username=live_server["username"],
+                password=live_server["password"],
+                timeout_seconds=5,
+            ),
+        )
+        report = engine.sync()
+        assert report.success(), f"welcome-note push failed: {report.errors}"
+        assert report.notes_pushed == 1
+
+        server_note = live_server["db"].get_note(note.id, load_pages=True)
+        assert server_note is not None
+        assert server_note.title == welcome_title
+
+
+class TestPushSerializationFailures:
+    """
+    EN: When path generation or payload serialization blows up, the sync
+        report must surface a useful reason — never a bare 500/traceback.
+    """
+
+    def test_push_reports_serialization_error_with_reason(self, tmp_path):
+        from nexanote.sync.client import SyncReport
+
+        db = FileNoteStore(tmp_path / "ser_fail")
+        nb = Notebook(name="Carnet")
+        db.save_notebook(nb)
+        note = Note(notebook_id=nb.id, title="Bad note", note_type=NoteType.TYPED)
+        note.add_page()
+        db.save_note(note)
+
+        engine = NexaNoteSyncEngine(
+            db,
+            SyncConfig(
+                server_url="http://localhost:9999/",
+                username="u",
+                password="p",
+            ),
+        )
+
+        # Stub path-bound network calls so the test never hits the wire,
+        # then make `_serialize_note_meta` blow up to force the error path.
+        engine.client.list_notebooks = lambda: []
+        engine.client.list_notes = lambda nb_slug: []
+        engine.client.create_notebook_dir = lambda nb_slug: True
+        engine.client.create_note_dir = lambda nb_slug, note_slug: True
+        engine.client.put_note_meta = lambda *a, **k: (True, None)
+        engine.client.put_ink_page = lambda *a, **k: (True, None)
+
+        from nexanote.sync import client as client_module
+
+        original = client_module._serialize_note_meta
+        try:
+            def boom(_note):
+                raise ValueError("simulated serialization bug")
+
+            client_module._serialize_note_meta = boom
+            report = SyncReport()
+            engine._push_note(note, report)
+        finally:
+            client_module._serialize_note_meta = original
+
+        assert report.errors, "serialization failure must produce a report error"
+        msg = report.errors[0]
+        assert "Bad note" in msg
+        assert "serialization failed" in msg
+        assert "simulated serialization bug" in msg
