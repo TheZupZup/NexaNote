@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Network security policy for NexaNote.
+
+    Goal: let users point the app at a self-hosted backend over either
+    https://my.domain.example (default-trusted) or http://192.168.x.x:8766
+    on their LAN/Tailscale/WireGuard network, without hardcoding any
+    specific domain or IP.
+
+    Android's <domain-config> rules match by hostname and do NOT match raw
+    IP literals, so there is no way to scope cleartext to "RFC1918 only"
+    from this file. Permitting cleartext at base-config is therefore the
+    minimum required to allow http://LAN_IP backends. HTTPS continues to
+    use the system trust store and remains the recommended scheme for
+    public domains.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

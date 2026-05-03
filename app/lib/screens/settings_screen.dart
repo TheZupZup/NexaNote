@@ -8,6 +8,7 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../services/app_state.dart';
+import '../services/server_url.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -556,9 +557,21 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       icon: const Icon(Icons.link, size: 16),
                       label: const Text('Reconnect'),
                       onPressed: () async {
-                        await context.read<AppState>().connect(
-                              url: _apiUrlCtrl.text.trim(),
-                            );
+                        final String url;
+                        try {
+                          url = ServerUrl.parse(_apiUrlCtrl.text).value;
+                        } on FormatException catch (e) {
+                          if (!mounted) return;
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(
+                              content: Text(e.message),
+                              backgroundColor:
+                                  Theme.of(context).colorScheme.error,
+                            ),
+                          );
+                          return;
+                        }
+                        await context.read<AppState>().connect(url: url);
                         if (mounted) {
                           ScaffoldMessenger.of(context).showSnackBar(
                             const SnackBar(content: Text('Reconnecting...')),
