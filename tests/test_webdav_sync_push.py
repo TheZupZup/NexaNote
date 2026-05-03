@@ -343,23 +343,68 @@ class TestLivePutIntoMissingParent:
         assert roundtripped["title"] == "Ma note synchronisée"
         assert roundtripped["pages"][0]["typed_content"] == "Hello"
 
-    def test_put_into_missing_parent_returns_409_not_500(self, live_server):
+    def test_put_into_missing_parent_auto_materialises(self, live_server):
         """
-        EN: Direct PUT (without MKCOL) to a nested path with no parent must
-            return 409, not 500 — and the body must hint that the parent
-            collection is missing rather than leaking a stack trace.
+        EN: PUT into a path whose ancestors don't yet exist must NOT fail
+            with 409. The provider materialises the missing notebook and
+            note from their slugs (id-prefix carried in the slug) so the
+            client's PUT lands on a real resource — sync push becomes
+            idempotent and survives a partial MKCOL chain.
+        FR: Un PUT sur un chemin sans parent ne doit pas échouer en 409 ;
+            le provider crée carnet/note à la volée à partir des slugs.
         """
         url = live_server["url"]
         auth = HTTPBasicAuth(live_server["username"], live_server["password"])
 
         resp = requests.put(
             f"{url}does-not-exist__deadbeef/note__cafebabe/note.json",
+            json={
+                "id": "cafebabe-1111-2222-3333-444455556666",
+                "title": "Auto-materialised note",
+                "type": "typed",
+                "tags": [],
+                "is_pinned": False,
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-01T00:00:00+00:00",
+                "pages": [
+                    {"page_number": 1, "template": "blank", "typed_content": "hi"},
+                ],
+            },
+            auth=auth,
+            timeout=5,
+        )
+        assert resp.status_code in (200, 201, 204), (
+            f"PUT must succeed via auto-materialise: {resp.status_code} {resp.text}"
+        )
+
+        # The note is now persisted on the server with the client's id.
+        server_note = live_server["db"].get_note(
+            "cafebabe-1111-2222-3333-444455556666", load_pages=True
+        )
+        assert server_note is not None
+        assert server_note.title == "Auto-materialised note"
+
+    def test_put_with_no_id_prefix_still_fails(self, live_server):
+        """
+        EN: Auto-materialisation only kicks in for slugs that carry a valid
+            id-prefix. A slug with no `__<hex>` suffix means the client
+            doesn't have a stable id yet, so we keep returning 409 to
+            surface the bug instead of silently inventing a note.
+        FR: Sans préfixe d'ID dans le slug, on garde le 409 — éviter de
+            créer une note silencieuse pour un client mal-câblé.
+        """
+        url = live_server["url"]
+        auth = HTTPBasicAuth(live_server["username"], live_server["password"])
+
+        resp = requests.put(
+            f"{url}also-missing/no-id-prefix/note.json",
             json={"id": "x", "pages": []},
             auth=auth,
             timeout=5,
         )
-        # 409 (parent missing) is the WebDAV-correct answer — not 500.
-        assert resp.status_code == 409, f"got {resp.status_code}: {resp.text}"
+        assert resp.status_code == 409, (
+            f"slug without id-prefix must still 409: {resp.status_code}"
+        )
 
 
 class TestSyncClientPushHappyPath:
@@ -442,6 +487,195 @@ class TestSyncClientPushHappyPath:
         client = _make_client(live_server)
         names = {m["name"] for m in client.list_notebooks()}
         assert DEFAULT_NOTEBOOK_SLUG in names
+
+
+# ---------------------------------------------------------------------------
+# Idempotent overwrite — pushing the same note twice or pushing modified
+# versions must never trip the 409 path. Regression coverage for the bug
+# where notes with non-ASCII titles (e.g. "Chaudré de saucisses") or
+# apostrophes ("Commande d'imprimante…") failed mid-sync with a 409.
+# ---------------------------------------------------------------------------
+
+
+class TestIdempotentPush:
+    def _engine(self, live_server, client_dir):
+        local_db = FileNoteStore(client_dir)
+        engine = NexaNoteSyncEngine(
+            local_db,
+            SyncConfig(
+                server_url=live_server["url"],
+                username=live_server["username"],
+                password=live_server["password"],
+                timeout_seconds=5,
+            ),
+        )
+        return local_db, engine
+
+    def _push_only(self, engine):
+        from nexanote.sync.client import SyncReport
+
+        report = SyncReport()
+        engine._push(report)
+        return report
+
+    def test_push_same_note_twice_does_not_fail(self, live_server, tmp_path):
+        """Re-uploading an unchanged note must succeed without 409."""
+        local_db, engine = self._engine(live_server, tmp_path / "client_twice")
+        nb = Notebook(name="Cuisine", color="#3b82f6")
+        local_db.save_notebook(nb)
+        note = Note(
+            notebook_id=nb.id,
+            title="Chaudré de saucisses",
+            note_type=NoteType.TYPED,
+        )
+        note.add_page(template="lined").typed_content = "Une vieille recette."
+        local_db.save_note(note)
+
+        first = engine.sync()
+        assert first.success(), f"first sync: {first.errors}"
+        assert first.notes_pushed == 1
+
+        # Re-mark MODIFIED to force a re-push, then push only (skip pull
+        # so the conflict resolver doesn't intercept the second upload).
+        local = local_db.get_note(note.id, load_pages=True)
+        local.sync_status = SyncStatus.MODIFIED
+        local_db.save_note(local, save_pages=False)
+        second = self._push_only(engine)
+        assert not second.errors, f"re-push must not 409: {second.errors}"
+        assert second.notes_pushed == 1
+
+    def test_push_modified_note_overwrites(self, live_server, tmp_path):
+        """Editing a note locally and pushing must replace the server copy."""
+        local_db, engine = self._engine(live_server, tmp_path / "client_mod")
+        nb = Notebook(name="Notes")
+        local_db.save_notebook(nb)
+        note = Note(
+            notebook_id=nb.id,
+            title="Commande d'imprimante qui ne veut pas se connecter",
+            note_type=NoteType.TYPED,
+        )
+        note.add_page().typed_content = "v1"
+        local_db.save_note(note)
+
+        first = engine.sync()
+        assert first.success(), first.errors
+        assert first.notes_pushed == 1
+
+        local = local_db.get_note(note.id, load_pages=True)
+        local.pages[0].typed_content = "v2 — modifié"
+        local.touch()
+        local.sync_status = SyncStatus.MODIFIED
+        local_db.save_note(local)
+
+        second = self._push_only(engine)
+        assert not second.errors, f"overwrite push must not 409: {second.errors}"
+
+        server_note = live_server["db"].get_note(note.id, load_pages=True)
+        assert server_note is not None
+        assert server_note.pages[0].typed_content.strip().endswith("v2 — modifié")
+
+    def test_push_existing_file_no_409(self, live_server, tmp_path):
+        """Direct PUT on an already-existing note.json must return 2xx, never 409."""
+        local_db = FileNoteStore(tmp_path / "client_direct")
+        nb = Notebook(name="Direct")
+        local_db.save_notebook(nb)
+        note = Note(notebook_id=nb.id, title="Déjà là", note_type=NoteType.TYPED)
+        note.add_page().typed_content = "first"
+        local_db.save_note(note)
+
+        client = _make_client(live_server)
+        nb_slug = _slugify(nb.name) + "__" + nb.id[:8]
+        note_slug = _slugify(note.title) + "__" + note.id[:8]
+
+        # Seed the server.
+        meta = {
+            "id": note.id,
+            "title": note.title,
+            "type": "typed",
+            "tags": [],
+            "is_pinned": False,
+            "created_at": note.created_at.isoformat(),
+            "updated_at": note.updated_at.isoformat(),
+            "pages": [
+                {"page_number": 1, "template": "blank", "typed_content": "first"},
+            ],
+        }
+        ok, reason = client.put_note_meta(nb_slug, note_slug, meta)
+        assert ok, f"initial PUT failed: {reason}"
+
+        # Overwrite the same path with new content.
+        meta["pages"][0]["typed_content"] = "second"
+        meta["updated_at"] = "2026-05-04T10:00:00+00:00"
+        ok, reason = client.put_note_meta(nb_slug, note_slug, meta)
+        assert ok, f"overwrite PUT must not 409: {reason}"
+
+        # The server now reflects the second write.
+        server_note = live_server["db"].get_note(note.id, load_pages=True)
+        assert server_note.pages[0].typed_content.strip().endswith("second")
+
+    def test_repeated_pushes_with_accented_title_are_idempotent(
+        self, live_server, tmp_path
+    ):
+        """
+        EN: Notes whose URL-encoded slug differs from their decoded slug
+            (e.g. é → %C3%A9) used to trigger a redundant MKCOL on every
+            push. The encoding mismatch in PROPFIND name comparison is now
+            fixed by URL-decoding the href client-side. Three back-to-back
+            pushes must never produce errors.
+        FR: Les notes accentuées déclenchaient un MKCOL redondant à chaque
+            push. Trois pushs consécutifs ne doivent jamais produire
+            d'erreur.
+        """
+        local_db, engine = self._engine(live_server, tmp_path / "client_accent")
+        nb = Notebook(name="Recettes")
+        local_db.save_notebook(nb)
+        note = Note(
+            notebook_id=nb.id,
+            title="Chaudré de saucisses",
+            note_type=NoteType.TYPED,
+        )
+        note.add_page().typed_content = "v1"
+        local_db.save_note(note)
+
+        for i in range(3):
+            local = local_db.get_note(note.id, load_pages=True)
+            local.pages[0].typed_content = f"v{i + 1}"
+            local.touch()
+            local.sync_status = SyncStatus.MODIFIED
+            local_db.save_note(local)
+
+            report = self._push_only(engine)
+            assert not report.errors, f"push {i + 1}: {report.errors}"
+            assert report.notes_pushed == 1
+
+    def test_propfind_decodes_url_encoded_names(self, live_server, tmp_path):
+        """
+        EN: The client compares slugs against PROPFIND names — those names
+            must be URL-decoded so notes/notebooks with non-ASCII chars in
+            their slug are correctly recognised as already existing.
+        FR: Le client compare les slugs aux noms de PROPFIND — ces noms
+            doivent être URL-décodés pour reconnaître correctement les
+            ressources existantes.
+        """
+        # Seed a notebook + note with accented chars on the server.
+        nb = Notebook(name="Recettes")
+        live_server["db"].save_notebook(nb)
+        note = Note(
+            notebook_id=nb.id,
+            title="Crème brûlée",
+            note_type=NoteType.TYPED,
+        )
+        note.add_page().typed_content = "..."
+        live_server["db"].save_note(note)
+
+        client = _make_client(live_server)
+        nb_slug = _slugify(nb.name) + "__" + nb.id[:8]
+        expected_note_slug = _slugify(note.title) + "__" + note.id[:8]
+
+        names = {entry["name"] for entry in client.list_notes(nb_slug)}
+        assert expected_note_slug in names, (
+            f"PROPFIND name must round-trip the decoded slug; got {names!r}"
+        )
 
 
 # ---------------------------------------------------------------------------

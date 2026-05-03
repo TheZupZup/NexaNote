@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
-from urllib.parse import urljoin, quote
+from urllib.parse import urljoin, quote, unquote
 
 import requests
 from requests.auth import HTTPBasicAuth
@@ -402,9 +402,20 @@ class WebDAVClient:
                 if not href or href.rstrip("/") == base_url.rstrip("/"):
                     continue  # On ignore la ressource elle-même
 
-                display_name = response.findtext(
-                    ".//D:displayname", "", ns
-                ) or href.rstrip("/").split("/")[-1]
+                # EN: Hrefs come back URL-encoded (WsgiDAV percent-encodes
+                #     non-ASCII like `é` → `%C3%A9`). The slugs we compare
+                #     against (`note_slug`, `nb_slug`) are kept decoded, so
+                #     we must decode here too — otherwise notes with accents
+                #     in their title look "missing" and the engine kicks
+                #     off a redundant MKCOL on every push, which masks real
+                #     409 failures and inflates server load.
+                # FR: Les hrefs sont URL-encodés. Les slugs comparés sont
+                #     décodés — on décode ici, sinon les notes accentuées
+                #     déclenchent un MKCOL inutile à chaque push.
+                raw_name = href.rstrip("/").split("/")[-1]
+                name = unquote(raw_name)
+
+                display_name = response.findtext(".//D:displayname", "", ns) or name
 
                 last_mod_text = response.findtext(".//D:getlastmodified", "", ns)
                 last_modified = None
@@ -418,7 +429,7 @@ class WebDAVClient:
                 is_col = response.find(".//D:collection", ns) is not None
 
                 resources.append({
-                    "name": href.rstrip("/").split("/")[-1],
+                    "name": name,
                     "href": href,
                     "display_name": display_name,
                     "is_collection": is_col,
