@@ -16,10 +16,27 @@ class ConnectScreen extends StatefulWidget {
 }
 
 class _ConnectScreenState extends State<ConnectScreen> {
-  final _controller = TextEditingController(text: 'http://127.0.0.1:8766');
+  late final TextEditingController _controller;
   bool _connecting = false;
   String? _error;
   bool _showDetails = false;
+
+  @override
+  void initState() {
+    super.initState();
+    // Pre-fill with the URL the user already entered, when there is one.
+    // Lets them retry a typo without retyping the whole address, and avoids
+    // overwriting a remote URL with the local-loopback default if they ever
+    // land back here from Settings → Reconnect.
+    final savedUrl = context.read<AppState>().apiUrl;
+    _controller = TextEditingController(text: savedUrl);
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
 
   Future<void> _connect() async {
     setState(() { _connecting = true; _error = null; });

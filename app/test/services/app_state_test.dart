@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sqflite/sqflite.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
@@ -14,6 +15,7 @@ class _StubApi extends api.ApiClient {
         super(baseUrl: 'http://stub.test');
   bool shouldThrow;
   final bool pingResult;
+  int createNoteCalls = 0;
 
   @override
   Future<bool> ping() async {
@@ -35,6 +37,29 @@ class _StubApi extends api.ApiClient {
   }) async {
     if (shouldThrow) throw Exception('boom');
     return const [];
+  }
+
+  @override
+  Future<api.Note> createNote({
+    required String title,
+    required String noteType,
+    String? notebookId,
+    String template = 'blank',
+  }) async {
+    createNoteCalls++;
+    if (shouldThrow) throw Exception('boom');
+    return api.Note(
+      id: 'srv-$createNoteCalls',
+      title: title,
+      noteType: noteType,
+      notebookId: notebookId,
+      tags: const [],
+      isPinned: false,
+      isDeleted: false,
+      pageCount: 1,
+      updatedAt: '',
+      createdAt: '',
+    );
   }
 }
 
@@ -247,5 +272,151 @@ void main() {
     expect(state.syncMessage, isNull);
     expect(state.syncError, isNotNull);
     expect(state.syncError, contains('Sync failed'));
+  });
+
+  // ── Mobile session-stability regression tests ─────────────────────
+  //
+  // These pin down the routing contract that keeps the user on HomeScreen
+  // after a runtime API failure. The router previously bounced any user
+  // without local data straight to ConnectScreen on every transient mobile
+  // network blip, forcing them to retype their server URL.
+
+  group('mobile session stability', () {
+    setUp(() {
+      TestWidgetsFlutterBinding.ensureInitialized();
+      SharedPreferences.setMockInitialValues({});
+    });
+
+    test(
+        'connected app stays on HomeScreen (hasEverConnected) after a '
+        'runtime API failure', () async {
+      await state.initLocal();
+      final stub = _StubApi();
+      final liveState = AppState(
+        localService: service,
+        clientFactory: (_) => stub,
+      );
+
+      await liveState.connect(url: 'http://192.0.2.10:8766');
+      expect(liveState.isBackendAvailable, isTrue);
+      expect(liveState.hasEverConnected, isTrue);
+      // Fresh remote backend, nothing in the local store yet — exactly the
+      // first-action mobile scenario from the bug report.
+      expect(liveState.hasLocalData, isFalse);
+
+      stub.shouldThrow = true;
+      await expectLater(
+          liveState.createNote(title: 'x', noteType: 'typed'),
+          throwsA(isA<Exception>()));
+
+      // Backend availability flips and the offline banner shows…
+      expect(liveState.isBackendAvailable, isFalse);
+      expect(liveState.backendErrorMessage, contains('Offline'));
+      // …but the routing flag stays true, so main.dart keeps HomeScreen.
+      expect(liveState.hasEverConnected, isTrue,
+          reason: 'router must not bounce a configured user to ConnectScreen');
+    });
+
+    test('saved server URL is preserved after a backend failure', () async {
+      await state.initLocal();
+      const remoteUrl = 'http://192.0.2.10:8766';
+      final stub = _StubApi();
+      final liveState = AppState(
+        localService: service,
+        clientFactory: (_) => stub,
+      );
+
+      await liveState.connect(url: remoteUrl);
+      expect(liveState.apiUrl, remoteUrl);
+
+      stub.shouldThrow = true;
+      await expectLater(
+          liveState.createNote(title: 'x', noteType: 'typed'),
+          throwsA(isA<Exception>()));
+
+      // In-memory URL is untouched.
+      expect(liveState.apiUrl, remoteUrl);
+      // Persisted URL is also untouched — a cold start would reload it.
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getString(kPrefsApiUrl), remoteUrl);
+    });
+
+    test(
+        'local-only actions never flip isBackendAvailable or '
+        'hasEverConnected', () async {
+      await state.initLocal();
+      final stub = _StubApi();
+      final liveState = AppState(
+        localService: service,
+        clientFactory: (_) => stub,
+      );
+      await liveState.connect(url: 'http://192.0.2.10:8766');
+      expect(liveState.isBackendAvailable, isTrue);
+
+      // Simulate the user using the offline-first SQLite path: creating a
+      // notebook + note locally must not touch the backend connection state.
+      final nb = await liveState.localService.createNotebook('Local NB');
+      await liveState.localService
+          .createNote('Local note', notebookId: nb.id);
+
+      expect(liveState.isBackendAvailable, isTrue);
+      expect(liveState.hasEverConnected, isTrue);
+      expect(liveState.backendErrorMessage, isNull);
+    });
+
+    test(
+        'remote URL persists across reconnect when the backend goes down '
+        'and comes back', () async {
+      await state.initLocal();
+      const remoteUrl = 'https://nexanote.example.com';
+      final stub = _StubApi();
+      final liveState = AppState(
+        localService: service,
+        clientFactory: (_) => stub,
+      );
+
+      // First connect: succeed and save the remote URL.
+      await liveState.connect(url: remoteUrl);
+      expect(liveState.isBackendAvailable, isTrue);
+      expect(liveState.hasEverConnected, isTrue);
+
+      // Backend goes away mid-session.
+      stub.shouldThrow = true;
+      await expectLater(
+          liveState.loadNotebooks(), throwsA(isA<Exception>()));
+      expect(liveState.isBackendAvailable, isFalse);
+      // URL is still there — the user never has to retype it.
+      expect(liveState.apiUrl, remoteUrl);
+
+      // Backend comes back. The next successful API call (without passing
+      // a URL) auto-recovers and the saved URL is unchanged.
+      stub.shouldThrow = false;
+      await liveState.loadNotebooks();
+      expect(liveState.isBackendAvailable, isTrue);
+      expect(liveState.apiUrl, remoteUrl);
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getString(kPrefsApiUrl), remoteUrl);
+    });
+
+    test(
+        'init() restores hasEverConnected from prefs so a cold start with '
+        'the backend down still keeps the user on HomeScreen', () async {
+      SharedPreferences.setMockInitialValues({
+        kPrefsApiUrl: 'http://192.0.2.10:8766',
+        kPrefsHasEverConnected: true,
+      });
+
+      final coldState = AppState(
+        localService: service,
+        clientFactory: (_) => _StubApi(shouldThrow: true),
+      );
+      await coldState.init();
+
+      expect(coldState.isBackendAvailable, isFalse,
+          reason: 'backend ping fails');
+      expect(coldState.hasEverConnected, isTrue,
+          reason: 'router relies on this to skip ConnectScreen');
+      expect(coldState.apiUrl, 'http://192.0.2.10:8766');
+    });
   });
 }

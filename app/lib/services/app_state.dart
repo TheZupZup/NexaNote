@@ -11,6 +11,14 @@ import '../data/models/notebook.dart' as local;
 
 typedef ApiClientFactory = api.ApiClient Function(String baseUrl);
 
+/// SharedPreferences key for the user-entered backend URL.
+const String kPrefsApiUrl = 'api_url';
+
+/// SharedPreferences key remembering whether we've ever completed a successful
+/// connection to a backend. Used by the router so a transient API failure on
+/// mobile does not bounce a configured user back to ConnectScreen.
+const String kPrefsHasEverConnected = 'has_ever_connected';
+
 class AppState extends ChangeNotifier {
   final LocalNoteService _localService;
   final ApiClientFactory _clientFactory;
@@ -18,6 +26,7 @@ class AppState extends ChangeNotifier {
   String _apiUrl = 'http://127.0.0.1:8766';
   bool _isConnected = false;
   bool _isBackendAvailable = false;
+  bool _hasEverConnected = false;
   String? _backendErrorMessage;
   String? _lastConnectError;
   bool _hasLocalData = false;
@@ -41,6 +50,11 @@ class AppState extends ChangeNotifier {
   String get apiUrl => _apiUrl;
   bool get isConnected => _isConnected;
   bool get isBackendAvailable => _isBackendAvailable;
+  /// True once the app has successfully reached a backend at least once. The
+  /// router uses this to keep the user on HomeScreen across runtime API
+  /// failures — bouncing a configured user back to ConnectScreen on every
+  /// transient mobile-network blip would force them to retype their URL.
+  bool get hasEverConnected => _hasEverConnected;
   String? get backendErrorMessage => _backendErrorMessage;
   String? get lastConnectError => _lastConnectError;
   bool get hasLocalData => _hasLocalData;
@@ -63,7 +77,8 @@ class AppState extends ChangeNotifier {
   Future<void> init() async {
     await initLocal();
     final prefs = await SharedPreferences.getInstance();
-    _apiUrl = prefs.getString('api_url') ?? 'http://127.0.0.1:8766';
+    _apiUrl = prefs.getString(kPrefsApiUrl) ?? 'http://127.0.0.1:8766';
+    _hasEverConnected = prefs.getBool(kPrefsHasEverConnected) ?? false;
     await connect();
   }
 
@@ -74,7 +89,7 @@ class AppState extends ChangeNotifier {
     if (url != null) {
       _apiUrl = url;
       final prefs = await SharedPreferences.getInstance();
-      await prefs.setString('api_url', _apiUrl);
+      await prefs.setString(kPrefsApiUrl, _apiUrl);
     }
     _isLoading = true;
     notifyListeners();
@@ -93,6 +108,7 @@ class AppState extends ChangeNotifier {
     _isBackendAvailable = _isConnected;
     if (_isConnected) {
       _backendErrorMessage = null;
+      await _markEverConnected();
       try {
         await loadNotebooks();
         await loadNotes();
@@ -108,6 +124,36 @@ class AppState extends ChangeNotifier {
 
     _isLoading = false;
     notifyListeners();
+  }
+
+  /// Records that the app has reached a backend at least once. Persisted so a
+  /// later cold-start with the backend temporarily down still keeps the user
+  /// on HomeScreen instead of bouncing them through the connect flow.
+  Future<void> _markEverConnected() async {
+    if (_hasEverConnected) return;
+    _hasEverConnected = true;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(kPrefsHasEverConnected, true);
+    } catch (_) {
+      // SharedPreferences write failures are non-fatal; the in-memory flag
+      // still keeps the current session on HomeScreen.
+    }
+  }
+
+  /// Clears the offline banner after a backend call succeeds. Lets the app
+  /// auto-recover from a transient failure as soon as the next request goes
+  /// through, without making the user go to Settings → Reconnect.
+  /// Callers are responsible for calling [notifyListeners] for their own
+  /// state update; this only flips the connection flags.
+  bool _markBackendAvailable() {
+    if (_isBackendAvailable && _isConnected && _backendErrorMessage == null) {
+      return false;
+    }
+    _isBackendAvailable = true;
+    _isConnected = true;
+    _backendErrorMessage = null;
+    return true;
   }
 
   /// Populates [_notebooks] and [_notes] from the local SQLite store so the
@@ -155,6 +201,7 @@ class AppState extends ChangeNotifier {
   Future<void> loadNotebooks() async {
     try {
       _notebooks = await client.getNotebooks();
+      _markBackendAvailable();
       notifyListeners();
     } catch (e) {
       await _handleBackendFailure(e);
@@ -166,6 +213,7 @@ class AppState extends ChangeNotifier {
     try {
       final nb = await client.createNotebook(name: name, color: color);
       _notebooks.insert(0, nb);
+      _markBackendAvailable();
       notifyListeners();
       return nb;
     } catch (e) {
@@ -179,6 +227,7 @@ class AppState extends ChangeNotifier {
       await client.deleteNotebook(id);
       _notebooks.removeWhere((n) => n.id == id);
       if (_selectedNotebook?.id == id) { _selectedNotebook = null; _notes = []; }
+      _markBackendAvailable();
       notifyListeners();
     } catch (e) {
       await _handleBackendFailure(e);
@@ -197,6 +246,7 @@ class AppState extends ChangeNotifier {
     notifyListeners();
     try {
       _notes = await client.getNotes(notebookId: notebookId, search: search);
+      _markBackendAvailable();
     } catch (e) {
       await _handleBackendFailure(e);
     }
@@ -210,6 +260,7 @@ class AppState extends ChangeNotifier {
         title: title, noteType: noteType,
         notebookId: _selectedNotebook?.id, template: template);
       _notes.insert(0, note);
+      _markBackendAvailable();
       notifyListeners();
       return note;
     } catch (e) {
@@ -223,6 +274,7 @@ class AppState extends ChangeNotifier {
       await client.deleteNote(id);
       _notes.removeWhere((n) => n.id == id);
       if (_selectedNote?.id == id) _selectedNote = null;
+      _markBackendAvailable();
       notifyListeners();
     } catch (e) {
       await _handleBackendFailure(e);
@@ -233,6 +285,7 @@ class AppState extends ChangeNotifier {
   Future<void> updateNoteTitle(String id, String title) async {
     try {
       await client.updateNote(id, title: title);
+      _markBackendAvailable();
       await loadNotes(notebookId: _selectedNotebook?.id);
     } catch (e) {
       await _handleBackendFailure(e);
@@ -243,6 +296,7 @@ class AppState extends ChangeNotifier {
   Future<void> savePageText(String noteId, int pageNum, String content) async {
     try {
       await client.savePageText(noteId, pageNum, content);
+      if (_markBackendAvailable()) notifyListeners();
     } catch (e) {
       await _handleBackendFailure(e);
       rethrow;
@@ -256,6 +310,7 @@ class AppState extends ChangeNotifier {
     try {
       final result = await client.triggerSync();
       final summary = result['summary'] ?? 'Sync complete';
+      _markBackendAvailable();
       _finishSync(message: summary);
       return summary;
     } catch (e) {
@@ -276,6 +331,8 @@ class AppState extends ChangeNotifier {
       final svc = service ??
           SyncService(apiClient: client, local: _localService);
       final result = await svc.sync();
+      _markBackendAvailable();
+      await _markEverConnected();
       _finishSync(message: 'Sync complete — ${result.summary}');
       return result;
     } catch (e) {
