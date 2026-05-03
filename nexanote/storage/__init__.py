@@ -7,7 +7,13 @@ EN: Public entry points:
       - NexaNoteDB            legacy SQLite store, kept for migration
 """
 
-from nexanote.storage.export import export_all, export_note, sanitize_filename
+from nexanote.storage.export import (
+    AutoExportConfig,
+    AutoExporter,
+    export_all,
+    export_note,
+    sanitize_filename,
+)
 from nexanote.storage.file_store import FileNoteStore
 from nexanote.storage.legacy_db import NexaNoteDB
 from nexanote.storage.migration import (
@@ -17,6 +23,8 @@ from nexanote.storage.migration import (
 )
 
 __all__ = [
+    "AutoExportConfig",
+    "AutoExporter",
     "FileNoteStore",
     "NexaNoteDB",
     "MigrationReport",
