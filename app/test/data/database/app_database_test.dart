@@ -91,5 +91,76 @@ void main() {
 
       await db.close();
     });
+
+    test('notes table has remote_id and remote_path columns', () async {
+      final db = await openDatabase(
+        inMemoryDatabasePath,
+        version: Schema.version,
+        onCreate: Schema.onCreate,
+      );
+
+      final cols = await db.rawQuery('PRAGMA table_info(notes)');
+      final names = cols.map((c) => c['name'] as String).toSet();
+      expect(names, containsAll(['remote_id', 'remote_path']));
+      await db.close();
+    });
+  });
+
+  group('Schema.onUpgrade', () {
+    test('adds remote_id/remote_path when migrating v1 → v2', () async {
+      final dbPath = inMemoryDatabasePath;
+
+      // Open at v1 with the v1 schema (no remote_id/remote_path).
+      final v1 = await openDatabase(
+        dbPath,
+        version: 1,
+        onCreate: (db, _) async {
+          await db.execute('''
+            CREATE TABLE notes (
+              id            TEXT PRIMARY KEY,
+              notebook_id   TEXT,
+              title         TEXT NOT NULL DEFAULT 'Untitled',
+              note_type     TEXT NOT NULL DEFAULT 'typed',
+              tags          TEXT NOT NULL DEFAULT '[]',
+              typed_content TEXT NOT NULL DEFAULT '',
+              is_pinned     INTEGER NOT NULL DEFAULT 0,
+              is_archived   INTEGER NOT NULL DEFAULT 0,
+              is_deleted    INTEGER NOT NULL DEFAULT 0,
+              sync_status   TEXT NOT NULL DEFAULT 'local_only',
+              created_at    TEXT NOT NULL,
+              updated_at    TEXT NOT NULL
+            )
+          ''');
+        },
+      );
+
+      final now = DateTime.utc(2024, 1, 1).toIso8601String();
+      await v1.insert('notes', {
+        'id': 'legacy', 'title': 'Legacy', 'created_at': now, 'updated_at': now,
+      });
+
+      final cols = await v1.rawQuery('PRAGMA table_info(notes)');
+      expect(
+        cols.map((c) => c['name'] as String).toSet(),
+        isNot(contains('remote_id')),
+      );
+
+      // Manually upgrade — exercise the same migration code openDatabase
+      // would run on a real install.
+      await Schema.onUpgrade(v1, 1, Schema.version);
+
+      final upgraded = await v1.rawQuery('PRAGMA table_info(notes)');
+      final names = upgraded.map((c) => c['name'] as String).toSet();
+      expect(names, containsAll(['remote_id', 'remote_path']));
+
+      // Existing row survives the migration; new columns default to NULL.
+      final row =
+          (await v1.query('notes', where: 'id = ?', whereArgs: ['legacy'])).first;
+      expect(row['title'], 'Legacy');
+      expect(row['remote_id'], isNull);
+      expect(row['remote_path'], isNull);
+
+      await v1.close();
+    });
   });
 }

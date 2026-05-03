@@ -28,6 +28,7 @@ class AppDatabase {
       dbPath,
       version: Schema.version,
       onCreate: Schema.onCreate,
+      onUpgrade: Schema.onUpgrade,
     );
 
     if (path == null) _instance = db;

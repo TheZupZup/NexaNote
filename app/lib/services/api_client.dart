@@ -4,6 +4,8 @@
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 
+import 'title_cleaner.dart';
+
 class Notebook {
   final String id;
   final String name;
@@ -57,7 +59,10 @@ class Note {
 
   factory Note.fromJson(Map<String, dynamic> j) => Note(
         id: j['id'],
-        title: j['title'],
+        // Strip slug/extension artifacts so list views and the editor
+        // never display things like `Foo__Md.Q2Hhd`. The server side keeps
+        // the raw title for storage; cleanup is a presentation concern.
+        title: cleanRemoteTitle((j['title'] as String?) ?? ''),
         noteType: j['note_type'] ?? 'typed',
         notebookId: j['notebook_id'],
         tags: List<String>.from(j['tags'] ?? []),

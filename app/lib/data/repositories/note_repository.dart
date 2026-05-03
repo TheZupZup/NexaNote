@@ -109,6 +109,20 @@ class NoteRepository {
     return Note.fromMap(rows.first);
   }
 
+  /// Returns the local note linked to [remoteId], or null if no local row
+  /// has been adopted for that remote yet. Used by SyncService to decide
+  /// between adopting an existing local row and inserting a new one.
+  Future<Note?> getNoteByRemoteId(String remoteId) async {
+    final rows = await _db.query(
+      'notes',
+      where: 'remote_id = ?',
+      whereArgs: [remoteId],
+      limit: 1,
+    );
+    if (rows.isEmpty) return null;
+    return Note.fromMap(rows.first);
+  }
+
   /// Soft-deletes a note by setting [is_deleted = 1] and marking it modified.
   Future<void> deleteNote(String id) async {
     final now = DateTime.now().toUtc().toIso8601String();
@@ -135,25 +149,38 @@ class NoteRepository {
     return rows.map(Note.fromMap).toList();
   }
 
-  /// Replaces notebooks/notes with the supplied records in a single
-  /// transaction. Strokes and stroke_points are intentionally **not**
-  /// touched: handwritten ink is user content and Phase 4A sync is
-  /// metadata-only. Strokes whose parent note disappears are left as
-  /// orphans for a future stroke-aware sync phase to reconcile.
-  Future<void> replaceAll({
-    required List<Notebook> notebooks,
-    required List<Note> notes,
-  }) async {
-    await _db.transaction((txn) async {
-      await txn.delete('notes');
-      await txn.delete('notebooks');
-      for (final nb in notebooks) {
-        await txn.insert('notebooks', nb.toMap());
-      }
-      for (final note in notes) {
-        await txn.insert('notes', note.toMap());
-      }
-    });
+  /// Inserts [note] or replaces the existing row with the same primary key.
+  ///
+  /// Used by the sync engine to adopt a remote .md file into the local DB
+  /// without going through the duplicating `INSERT` path of [createNote].
+  Future<void> upsertNote(Note note) async {
+    await _db.insert(
+      'notes',
+      note.toMap(),
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+  }
+
+  /// Inserts [notebook] or replaces an existing row with the same id.
+  Future<void> upsertNotebook(Notebook notebook) async {
+    await _db.insert(
+      'notebooks',
+      notebook.toMap(),
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+  }
+
+  /// Removes the row with [id] from `notes`. Hard delete — used by sync to
+  /// drop notes that were 'synced' locally but no longer exist on the
+  /// remote (the user deleted them server-side). Local-only and modified
+  /// notes are skipped by callers, so they survive a pull.
+  Future<int> hardDeleteNote(String id) async {
+    return _db.delete('notes', where: 'id = ?', whereArgs: [id]);
+  }
+
+  /// Removes the row with [id] from `notebooks` (hard delete).
+  Future<int> hardDeleteNotebook(String id) async {
+    return _db.delete('notebooks', where: 'id = ?', whereArgs: [id]);
   }
 
   // -----------------------------------------------------------------------
