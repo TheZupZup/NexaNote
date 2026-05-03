@@ -25,6 +25,7 @@ FR: Remplace l'ancienne base SQLite par une arborescence de fichiers,
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
@@ -61,6 +62,16 @@ NOTEBOOKS_DIR = "notebooks"
 FRONTMATTER_DELIM = "---"
 PAGE_MARKER_RE = re.compile(r"^<!--\s*nexanote:page\s+(\d+)\s*-->\s*$", re.MULTILINE)
 DRAWING_SCHEMA_VERSION = 1
+
+# EN: Synthetic id prefix used for plain Markdown files (no frontmatter).
+#     The remainder is URL-safe base64 of the file stem so the id is stable
+#     across reads and the original filename can be recovered without an
+#     extra index. The chars used by the prefix and base64 alphabet all
+#     pass through `_safe_id()` unchanged.
+# FR: Préfixe d'id pour les fichiers Markdown bruts (sans frontmatter). Le
+#     reste est le stem en base64 url-safe : id stable et nom de fichier
+#     récupérable sans index annexe.
+PLAIN_MD_ID_PREFIX = "md."
 
 
 # ---------------------------------------------------------------------------
@@ -487,6 +498,9 @@ class FileNoteStore:
     # ------------------------------------------------------------------
 
     def _note_path(self, note_id: str) -> Path:
+        stem = stem_from_plain_md_id(note_id)
+        if stem is not None:
+            return self.notes_dir / f"{stem}.md"
         return self.notes_dir / f"{_safe_id(note_id)}.md"
 
     def _drawing_path(self, note_id: str) -> Path:
@@ -603,7 +617,10 @@ class FileNoteStore:
 
         note = deserialize_note(md_text, drawings)
         if note is None:
-            return None
+            # Plain Markdown (no NexaNote frontmatter) — surface it as a note
+            # without rewriting the file. Internal storage stays untouched
+            # until the user explicitly saves an edit through NexaNote.
+            note = synthesize_plain_md_note(note_path, md_text)
         if not load_pages:
             note.pages = []
         return note
@@ -625,7 +642,7 @@ class FileNoteStore:
                 continue
             note = deserialize_note(md_text, None)
             if note is None:
-                continue
+                note = synthesize_plain_md_note(path, md_text)
             note.pages = []  # listings are metadata-only
 
             if not include_deleted and note.is_deleted:
@@ -734,17 +751,24 @@ class FileNoteStore:
             notebooks += 1
 
         for path in self.notes_dir.glob("*.md"):
-            note = self._read_note(path.stem, load_pages=True)
-            if note is None:
+            try:
+                md_text = path.read_text(encoding="utf-8")
+            except OSError:
                 continue
+            note = deserialize_note(md_text, None)
+            if note is None:
+                note = synthesize_plain_md_note(path, md_text)
             if note.is_deleted:
                 notes_deleted += 1
                 continue
             if note.is_archived:
                 continue
+            # Reload with pages/strokes for the body counters. Plain MDs don't
+            # have a drawings sidecar, so this is a no-op for them.
+            full = self._read_note(note.id, load_pages=True) or note
             notes += 1
-            pages += len(note.pages)
-            for page in note.pages:
+            pages += len(full.pages)
+            for page in full.pages:
                 strokes += len(page.strokes)
 
         return {
@@ -761,6 +785,7 @@ class FileNoteStore:
 # ---------------------------------------------------------------------------
 
 _SAFE_ID_RE = re.compile(r"[^A-Za-z0-9._-]")
+_BASE64_URLSAFE_RE = re.compile(r"[A-Za-z0-9_\-]+")
 
 
 def _safe_id(value: str) -> str:
@@ -769,6 +794,64 @@ def _safe_id(value: str) -> str:
         return "_"
     sanitized = _SAFE_ID_RE.sub("_", value)
     return sanitized[:160]  # generous cap
+
+
+def plain_md_id_from_stem(stem: str) -> str:
+    """Build the synthetic note id used to address a plain `.md` file."""
+    encoded = base64.urlsafe_b64encode(stem.encode("utf-8")).decode("ascii").rstrip("=")
+    return f"{PLAIN_MD_ID_PREFIX}{encoded}"
+
+
+def stem_from_plain_md_id(note_id: str) -> Optional[str]:
+    """Inverse of `plain_md_id_from_stem`. Returns None for non-plain ids."""
+    if not note_id or not note_id.startswith(PLAIN_MD_ID_PREFIX):
+        return None
+    encoded = note_id[len(PLAIN_MD_ID_PREFIX):]
+    if not encoded or not _BASE64_URLSAFE_RE.fullmatch(encoded):
+        return None
+    pad = (-len(encoded)) % 4
+    try:
+        return base64.urlsafe_b64decode(encoded + "=" * pad).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        return None
+
+
+def synthesize_plain_md_note(path: Path, md_text: str) -> Note:
+    """
+    EN: Build a Note from a plain Markdown file (no NexaNote frontmatter).
+        Title comes from the filename, body is the raw file content, and
+        timestamps are derived from the filesystem so external edits show
+        up on the next listing.
+    FR: Construit une Note à partir d'un fichier Markdown brut. Le titre
+        vient du nom de fichier, le corps est le contenu, et les dates
+        viennent du système de fichiers.
+    """
+    try:
+        stat = path.stat()
+        created = datetime.fromtimestamp(stat.st_ctime, tz=timezone.utc)
+        updated = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
+    except OSError:
+        created = updated = _now()
+
+    note_id = plain_md_id_from_stem(path.stem)
+    page = Page(
+        id=f"{note_id}::p1",
+        note_id=note_id,
+        page_number=1,
+        template="blank",
+        typed_content=md_text.rstrip("\n"),
+        created_at=created,
+        updated_at=updated,
+    )
+    return Note(
+        id=note_id,
+        title=path.stem,
+        note_type=NoteType.TYPED,
+        sync_status=SyncStatus.LOCAL_ONLY,
+        created_at=created,
+        updated_at=updated,
+        pages=[page],
+    )
 
 
 def _merge_metadata(meta_source: Note, with_pages: Note) -> Note:

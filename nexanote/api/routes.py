@@ -30,6 +30,8 @@ Routes:
   POST   /sync/trigger                → déclencher une sync WebDAV
   GET    /sync/status                 → état de la dernière sync
 
+  POST   /export/markdown             → export propre vers un dossier (Obsidian)
+
   GET    /stats                       → statistiques globales
   GET    /search?q=...                → recherche par titre
 """
@@ -168,6 +170,17 @@ class SyncReportSchema(BaseModel):
     errors: list[str]
     duration_seconds: float
     summary: str
+
+
+class ExportRequestSchema(BaseModel):
+    target_dir: Optional[str] = None
+    include_archived: bool = False
+
+
+class ExportReportSchema(BaseModel):
+    target_dir: str
+    exported: int
+    files: list[str]
 
 
 # ---------------------------------------------------------------------------
@@ -578,6 +591,37 @@ def create_app(db: FileNoteStore) -> FastAPI:
     @app.get("/sync/status")
     def sync_status():
         return _last_sync_report or {"status": "never_synced"}
+
+    # ------------------------------------------------------------------
+    # Export Markdown (Obsidian-friendly)
+    # ------------------------------------------------------------------
+
+    @app.post("/export/markdown", response_model=ExportReportSchema)
+    def export_markdown(data: ExportRequestSchema):
+        """
+        EN: Write each note as a clean `<title>.md` file (body only, no
+            frontmatter) into `target_dir`. Defaults to `<data_dir>/export`
+            when no target is given. Internal NexaNote storage is untouched.
+        FR: Écrit chaque note en `<titre>.md` propre (corps seul) dans
+            `target_dir`. Par défaut `<data_dir>/export`. N'altère pas
+            le stockage interne.
+        """
+        from nexanote.storage.export import export_all
+
+        target = (
+            Path(data.target_dir).expanduser()
+            if data.target_dir
+            else db.data_dir / "export"
+        )
+        try:
+            paths = export_all(db, target, include_archived=data.include_archived)
+        except OSError as exc:
+            raise HTTPException(500, f"export failed: {exc}")
+        return ExportReportSchema(
+            target_dir=str(target),
+            exported=len(paths),
+            files=[str(p) for p in paths],
+        )
 
     # ------------------------------------------------------------------
     # Stats et recherche
