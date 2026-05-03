@@ -20,8 +20,17 @@ from pathlib import Path
 from cheroot import wsgi
 from wsgidav.wsgidav_app import WsgiDAVApp
 
+from nexanote.models.note import Notebook
 from nexanote.storage import FileNoteStore, run_migration
 from nexanote.sync.webdav_provider import NexaNoteDAVProvider
+
+# EN: Slug for the fallback notebook used to host notes that aren't assigned
+#     to any user-created notebook. Mirrors the constant in sync.client so
+#     push targets always have a valid parent collection on the server.
+# FR: Slug du carnet de repli pour les notes sans carnet attribué. Identique
+#     au constant côté client : garantit un parent valide pour les PUT.
+DEFAULT_NOTEBOOK_NAME = "Uncategorized"
+DEFAULT_NOTEBOOK_ID_PREFIX = "00000000"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -34,6 +43,39 @@ logger = logging.getLogger("nexanote.server")
 def _hash_password(password: str) -> str:
     """Hash SHA-256 simple — pour production utiliser bcrypt."""
     return hashlib.sha256(password.encode()).hexdigest()
+
+
+def ensure_storage_layout(db: FileNoteStore) -> None:
+    """
+    EN: Make sure the on-disk directories WebDAV expects (notes/, drawings/,
+        notebooks/) exist. ``FileNoteStore.__init__`` already creates them,
+        but call this defensively before serving so a wiped data dir during
+        runtime is recreated rather than throwing on the first request.
+    FR: S'assure que les dossiers attendus par WebDAV existent. Idempotent.
+    """
+    for d in (db.notes_dir, db.drawings_dir, db.notebooks_dir):
+        d.mkdir(parents=True, exist_ok=True)
+
+
+def ensure_default_notebook(db: FileNoteStore) -> Notebook:
+    """
+    EN: Ensure the fallback "Uncategorized" notebook exists. Notes pushed
+        without a notebook id land here, so its parent collection must be
+        present on the server before the client's first PUT.
+    FR: Garantit que le carnet "Uncategorized" existe. Les notes sans
+        carnet y sont rangées : son dossier doit déjà être créé côté serveur.
+    """
+    for nb in db.list_notebooks():
+        if nb.id.startswith(DEFAULT_NOTEBOOK_ID_PREFIX):
+            return nb
+    notebook = Notebook(
+        id=f"{DEFAULT_NOTEBOOK_ID_PREFIX}-0000-0000-0000-000000000000",
+        name=DEFAULT_NOTEBOOK_NAME,
+        color="#6b7280",
+    )
+    db.save_notebook(notebook)
+    logger.info("Default notebook created: %s", DEFAULT_NOTEBOOK_NAME)
+    return notebook
 
 
 def build_app(
@@ -114,8 +156,16 @@ def run_server(
         logger.info(migration_report.summary())
     db = FileNoteStore(data_dir)
 
-    # Créer un carnet de démonstration si le store est vide
-    notebooks = db.list_notebooks()
+    # Ensure required WebDAV directories exist + the fallback notebook is
+    # present, so the very first sync push has valid parent collections.
+    ensure_storage_layout(db)
+    ensure_default_notebook(db)
+
+    # Créer un carnet de démonstration si seul le carnet de repli existe.
+    notebooks = [
+        nb for nb in db.list_notebooks()
+        if not nb.id.startswith(DEFAULT_NOTEBOOK_ID_PREFIX)
+    ]
     if not notebooks:
         from nexanote.models.note import Note, Notebook, NoteType
         nb = Notebook(name="Mon premier carnet", color="#6366f1")

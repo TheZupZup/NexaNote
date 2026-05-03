@@ -204,49 +204,138 @@ class WebDAVClient:
     def put_note_meta(
         self, notebook_slug: str, note_slug: str, data: dict
     ) -> tuple[bool, Optional[str]]:
-        """PUT /{notebook}/{note}/note.json — returns (ok, reason_if_failed)."""
+        """
+        EN: PUT /{notebook}/{note}/note.json. On 409 (parent missing) we
+            transparently MKCOL the parents and retry once — keeps push
+            reliable when the server hasn't seen this notebook/note yet.
+        FR: PUT note.json. Si le serveur renvoie 409 (parent absent), on
+            crée les dossiers parents en MKCOL et on retente une fois.
+        Returns (ok, reason_if_failed).
+        """
         url = self._url(notebook_slug, note_slug, "note.json")
-        try:
-            resp = self.session.put(
-                url,
-                json=data,
-                headers={"Content-Type": "application/json"},
-                timeout=self.config.timeout_seconds,
-            )
-            if resp.status_code in (200, 201, 204):
-                return True, None
-            reason = f"WebDAV upload failed: {resp.status_code} {resp.reason or ''}".strip()
-            logger.error(f"PUT note.json échoué ({url}): {reason}")
-            return False, reason
-        except requests.RequestException as e:
-            reason = _sanitize_request_error(e)
-            logger.error(f"PUT note.json échoué ({url}): {reason}")
-            return False, reason
+        return self._put_json(
+            url,
+            data,
+            label="note.json",
+            mkcol_paths=(notebook_slug, f"{notebook_slug}/{note_slug}"),
+        )
 
     def put_ink_page(
         self, notebook_slug: str, note_slug: str, page_num: int, data: dict
     ) -> tuple[bool, Optional[str]]:
-        """PUT /{notebook}/{note}/page_N.ink — returns (ok, reason_if_failed)."""
+        """
+        EN: PUT /{notebook}/{note}/page_N.ink with the same MKCOL-on-409
+            recovery as ``put_note_meta``.
+        FR: PUT page_N.ink avec la même récupération MKCOL sur 409.
+        """
         url = self._url(notebook_slug, note_slug, f"page_{page_num}.ink")
-        try:
-            resp = self.session.put(
+        return self._put_json(
+            url,
+            data,
+            label=f"page_{page_num}.ink",
+            mkcol_paths=(notebook_slug, f"{notebook_slug}/{note_slug}"),
+            page_num=page_num,
+        )
+
+    def _put_json(
+        self,
+        url: str,
+        data: dict,
+        label: str,
+        mkcol_paths: tuple[str, ...],
+        page_num: Optional[int] = None,
+    ) -> tuple[bool, Optional[str]]:
+        """
+        EN: Internal helper that performs PUT with a single MKCOL-and-retry
+            cycle when the server returns 409 (parent collection missing).
+            Treats every non-2xx response uniformly so callers get a stable
+            (ok, reason) shape.
+        FR: Helper interne pour PUT avec récupération MKCOL+retry sur 409.
+        """
+        prefix = f"{label}: " if page_num is None else f"page {page_num}: "
+
+        def _do_put() -> requests.Response:
+            return self.session.put(
                 url,
                 json=data,
                 headers={"Content-Type": "application/json"},
                 timeout=self.config.timeout_seconds,
             )
+
+        try:
+            resp = _do_put()
             if resp.status_code in (200, 201, 204):
                 return True, None
-            reason = (
-                f"WebDAV upload failed (page {page_num}): "
-                f"{resp.status_code} {resp.reason or ''}"
-            ).strip()
-            logger.error(f"PUT page.ink échoué ({url}): {reason}")
+
+            if resp.status_code == 409 and self._mkcol_chain(mkcol_paths):
+                logger.info(
+                    "PUT %s returned 409 — MKCOL'd parents, retrying once",
+                    label,
+                )
+                resp = _do_put()
+                if resp.status_code in (200, 201, 204):
+                    return True, None
+
+            reason = self._format_http_failure(resp, prefix)
+            logger.error(f"PUT {label} échoué ({url}): {reason}")
             return False, reason
-        except requests.RequestException as e:
-            reason = f"page {page_num}: {_sanitize_request_error(e)}"
-            logger.error(f"PUT page.ink échoué ({url}): {reason}")
+        except requests.RequestException as exc:
+            reason = f"{prefix}{_sanitize_request_error(exc)}"
+            logger.error(f"PUT {label} échoué ({url}): {reason}")
             return False, reason
+
+    @staticmethod
+    def _format_http_failure(resp: requests.Response, prefix: str) -> str:
+        """
+        EN: Turn a non-2xx response into a short user-safe message. We
+            include the body for 5xx so backend errors aren't reduced to
+            an opaque "500" — but cap the length so leaked stack traces
+            don't bloat the UI.
+        FR: Formate une réponse non-2xx en message court. Pour les 5xx,
+            on inclut le corps tronqué pour exposer le motif réel.
+        """
+        base = f"{prefix}WebDAV upload failed: {resp.status_code} {resp.reason or ''}".strip()
+        if 500 <= resp.status_code < 600:
+            try:
+                body = resp.text.strip()
+            except Exception:
+                body = ""
+            if body:
+                snippet = body[:200].replace("\n", " ")
+                if len(body) > 200:
+                    snippet += "…"
+                return f"{base} — {snippet}"
+        return base
+
+    def _mkcol_chain(self, paths: tuple[str, ...]) -> bool:
+        """
+        EN: MKCOL each path in order. Returns True if every step yielded a
+            success-equivalent status (created or already-exists). Used to
+            heal a 409 caused by a missing parent collection.
+        FR: MKCOL chaque chemin dans l'ordre. Retourne True si chaque étape
+            a réussi (créé ou déjà présent). Sert à corriger un 409 dû à
+            un parent manquant.
+        """
+        for path in paths:
+            url = urljoin(self.base_url, "/".join(quote(p, safe="") for p in path.split("/") if p))
+            try:
+                resp = self.session.request(
+                    "MKCOL",
+                    url,
+                    timeout=self.config.timeout_seconds,
+                )
+            except requests.RequestException as exc:
+                logger.warning(f"MKCOL chain failed at {path}: {exc}")
+                return False
+            if not self._is_mkcol_success(resp.status_code):
+                logger.warning(
+                    "MKCOL chain rejected at %s: %s %s",
+                    path,
+                    resp.status_code,
+                    resp.reason,
+                )
+                return False
+        return True
 
     def create_notebook_dir(self, notebook_slug: str) -> bool:
         """MKCOL /{notebook} — creates a notebook folder on the remote server."""
