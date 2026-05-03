@@ -22,7 +22,7 @@ from cheroot import wsgi
 from wsgidav.wsgidav_app import WsgiDAVApp
 
 from nexanote.models.note import Note, Notebook, NoteType, SyncStatus
-from nexanote.storage import FileNoteStore, run_migration
+from nexanote.storage import FileNoteStore, create_store, run_migration
 from nexanote.sync.webdav_provider import NexaNoteDAVProvider
 
 # EN: Slug for the fallback notebook used to host notes that aren't assigned
@@ -203,7 +203,7 @@ def run_server(
     migration_report = run_migration(data_dir)
     if migration_report.ran:
         logger.info(migration_report.summary())
-    db = FileNoteStore(data_dir)
+    db = create_store(data_dir)
 
     # Ensure required WebDAV directories exist + the fallback notebook is
     # present, so the very first sync push has valid parent collections.

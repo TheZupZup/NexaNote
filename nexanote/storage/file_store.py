@@ -34,7 +34,7 @@ import tempfile
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import yaml
 
@@ -47,6 +47,11 @@ from nexanote.models.note import (
     Point,
     SyncStatus,
 )
+
+if TYPE_CHECKING:
+    # EN: `export` imports this module, so only resolve the type at check time
+    #     to keep runtime imports cycle-free.
+    from nexanote.storage.export import AutoExportConfig  # noqa: F401
 
 logger = logging.getLogger("nexanote.storage.file")
 
@@ -464,13 +469,25 @@ class FileNoteStore:
 
     SCHEMA_VERSION = 2  # Bumped when the on-disk layout changes.
 
-    def __init__(self, data_dir: Path) -> None:
+    def __init__(
+        self,
+        data_dir: Path,
+        auto_export: Optional["AutoExportConfig"] = None,
+    ) -> None:
         self.data_dir = Path(data_dir)
         self.notes_dir = self.data_dir / NOTES_DIR
         self.drawings_dir = self.data_dir / DRAWINGS_DIR
         self.notebooks_dir = self.data_dir / NOTEBOOKS_DIR
         for d in (self.notes_dir, self.drawings_dir, self.notebooks_dir):
             d.mkdir(parents=True, exist_ok=True)
+
+        # EN: Lazy import — `export` depends on this module for `_atomic_write`,
+        #     so doing it at module top would create a circular import.
+        # FR: Import retardé — évite l'import circulaire avec `export`.
+        from nexanote.storage.export import AutoExportConfig, AutoExporter
+        if auto_export is None:
+            auto_export = AutoExportConfig.from_env(self.data_dir / "export")
+        self.auto_exporter = AutoExporter(auto_export)
 
     # ------------------------------------------------------------------
     # Compatibility shims for code paths that used to read db.db_path
@@ -592,6 +609,14 @@ class FileNoteStore:
                     json.dumps(drawings, ensure_ascii=False, indent=2).encode("utf-8"),
                 )
 
+        # EN: Mirror the saved note as clean Markdown if auto-export is on.
+        #     Runs outside the per-file lock so a slow target FS can't block
+        #     concurrent writes to other notes; the exporter uses its own lock
+        #     to keep the index consistent.
+        # FR: Réplique la note sauvée en Markdown propre si l'export auto est
+        #     activé. Hors du lock fichier pour ne pas bloquer d'autres écritures.
+        self.auto_exporter.export(note)
+
     def get_note(self, note_id: str, load_pages: bool = True) -> Optional[Note]:
         return self._read_note(note_id, load_pages=load_pages)
 
@@ -668,6 +693,9 @@ class FileNoteStore:
                     p.unlink()
                 except FileNotFoundError:
                     pass
+
+        # Mirror the purge into the auto-exported directory if enabled.
+        self.auto_exporter.remove(note_id)
 
     # ------------------------------------------------------------------
     # Pages CRUD (kept for API parity — a page write rewrites the note)
