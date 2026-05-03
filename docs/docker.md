@@ -89,23 +89,124 @@ docker build \
   .
 ```
 
+A plain `docker build` produces an image for the host architecture only. If
+you publish from an x86 laptop and pull the image onto an ARM NAS (such as a
+Ugreen DXP, Raspberry Pi, or Apple Silicon dev machine), Docker will warn
+about a platform mismatch and may refuse to run. The next section covers how
+to publish a single tag that supports both `linux/amd64` and `linux/arm64`.
+
 ---
 
-## Publish to Docker Hub
+## Publish to Docker Hub (multi-arch)
 
 Maintainers only — most users do not need this.
+
+NexaNote backend images are published as multi-arch manifests so the same
+tag (`latest`, `0.1.0`, …) works on:
+
+- `linux/amd64` — typical x86_64 servers, Synology Plus, Intel/AMD NAS
+- `linux/arm64` — Ugreen DXP (ARM), Raspberry Pi 4/5, Apple Silicon, AWS Graviton
+
+### One-time setup
+
+You only need to do this once per machine. It enables QEMU emulation so an
+x86 host can cross-build ARM images, and creates a buildx builder that
+supports multi-platform output.
+
+```bash
+# Enable QEMU for foreign architectures (amd64 ↔ arm64)
+docker run --privileged --rm tonistiigi/binfmt --install all
+
+# Create and use a multi-arch builder (only needed once)
+docker buildx create --name nexanote-builder --use
+docker buildx inspect --bootstrap
+```
+
+Verify both platforms appear under `Platforms:`:
+
+```
+Platforms: linux/amd64, linux/arm64, ...
+```
+
+### Build and push
+
+Log in, then build for both architectures and push in a single step. `buildx`
+cannot load a multi-arch image into the local Docker daemon, so `--push` is
+required (or `--output type=oci` for offline use).
 
 ```bash
 docker login
 
-docker push thezupzup/nexanote-backend:latest
-# and any version tags you built
-docker push thezupzup/nexanote-backend:0.1.0
+docker buildx build \
+  --platform linux/amd64,linux/arm64 \
+  -t thezupzup/nexanote-backend:latest \
+  --push .
+```
+
+To cut a versioned release, push both `latest` and the version tag together
+so the manifest is built once and tagged twice:
+
+```bash
+docker buildx build \
+  --platform linux/amd64,linux/arm64 \
+  -t thezupzup/nexanote-backend:latest \
+  -t thezupzup/nexanote-backend:0.1.0 \
+  --push .
 ```
 
 The image name follows the convention `thezupzup/nexanote-backend:<tag>`.
 Use `latest` for the rolling release and `MAJOR.MINOR.PATCH` for pinned
 versions.
+
+### Verify the multi-arch manifest
+
+After pushing, confirm both architectures are present:
+
+```bash
+docker buildx imagetools inspect thezupzup/nexanote-backend:latest
+```
+
+You should see two entries under `Manifests:` — one for `linux/amd64` and
+one for `linux/arm64`.
+
+### Using Podman instead of Docker
+
+Podman supports the same workflow with a near-identical CLI:
+
+```bash
+podman login docker.io
+
+podman buildx build \
+  --platform linux/amd64,linux/arm64 \
+  -t docker.io/thezupzup/nexanote-backend:latest \
+  --push .
+```
+
+If `podman buildx` is not available on your system, the equivalent
+`podman manifest` flow is:
+
+```bash
+podman manifest create thezupzup/nexanote-backend:latest
+
+podman build --platform linux/amd64 --manifest thezupzup/nexanote-backend:latest .
+podman build --platform linux/arm64 --manifest thezupzup/nexanote-backend:latest .
+
+podman manifest push --all thezupzup/nexanote-backend:latest \
+  docker://docker.io/thezupzup/nexanote-backend:latest
+```
+
+### Automated releases (GitHub Actions)
+
+Maintainers can also push a git tag matching `v*` (e.g. `v0.1.0`) to trigger
+the [`docker-publish.yml`](../.github/workflows/docker-publish.yml) workflow,
+which builds and pushes both architectures to Docker Hub automatically. The
+workflow needs two repository secrets:
+
+- `DOCKERHUB_USERNAME`
+- `DOCKERHUB_TOKEN` — a Docker Hub [access token](https://hub.docker.com/settings/security)
+
+It tags the image with the version (`0.1.0`), the major.minor (`0.1`), and
+`latest`.
 
 ---
 
@@ -160,6 +261,10 @@ Most NAS systems have a Docker / Container Manager UI that can pull an image
 from Docker Hub and run it from a `docker-compose.yml`. NexaNote works the
 same way as Plex or Jellyfin — pull the image, mount a data folder, expose the
 ports.
+
+The published image is multi-arch (`linux/amd64` + `linux/arm64`), so both
+Intel/AMD NAS units and ARM units (Ugreen DXP, Raspberry Pi, etc.) pull the
+correct variant automatically with no platform warnings.
 
 Example `docker-compose.yml` to drop into your NAS:
 

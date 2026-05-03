@@ -124,8 +124,12 @@ docker run -d \
 ```
 
 This starts the backend on ports `8766` (API) and `8765` (WebDAV), with data
-persisted in the mounted volume. See [docs/docker.md](docs/docker.md) for the
-full guide, including a NAS (Synology / Ugreen) compose example.
+persisted in the mounted volume. The image is published as a multi-arch
+manifest (`linux/amd64` + `linux/arm64`), so x86 servers and ARM NAS units
+(Ugreen DXP, Raspberry Pi, etc.) both pull the right variant automatically.
+
+See [docs/docker.md](docs/docker.md) for the full guide, including a NAS
+(Synology / Ugreen) compose example and multi-arch buildx instructions.
 
 ---
 
