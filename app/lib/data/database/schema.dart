@@ -8,7 +8,10 @@ import 'package:sqflite/sqflite.dart';
 /// Mirrors the Python schema in nexanote/storage/database.py.
 /// Keep this file as the single source of truth for table definitions.
 class Schema {
-  static const int version = 1;
+  /// Bumped to 2 when remote_id/remote_path columns were added so the
+  /// SyncService can map a local note to its canonical .md file on the
+  /// WebDAV/NAS without inventing a fresh row on every pull.
+  static const int version = 2;
 
   static const String _createNotebooks = '''
     CREATE TABLE IF NOT EXISTS notebooks (
@@ -38,6 +41,8 @@ class Schema {
       is_archived   INTEGER NOT NULL DEFAULT 0,
       is_deleted    INTEGER NOT NULL DEFAULT 0,
       sync_status   TEXT NOT NULL DEFAULT 'local_only',
+      remote_id     TEXT,
+      remote_path   TEXT,
       created_at    TEXT NOT NULL,
       updated_at    TEXT NOT NULL,
       FOREIGN KEY (notebook_id) REFERENCES notebooks(id)
@@ -77,6 +82,12 @@ class Schema {
   static const String _indexNotesUpdated =
       'CREATE INDEX IF NOT EXISTS idx_notes_updated ON notes(updated_at)';
 
+  static const String _indexNotesRemoteId =
+      'CREATE INDEX IF NOT EXISTS idx_notes_remote_id ON notes(remote_id)';
+
+  static const String _indexNotesRemotePath =
+      'CREATE INDEX IF NOT EXISTS idx_notes_remote_path ON notes(remote_path)';
+
   static const String _indexStrokesNote =
       'CREATE INDEX IF NOT EXISTS idx_strokes_note ON strokes(note_id)';
 
@@ -91,7 +102,25 @@ class Schema {
     await db.execute(_createStrokePoints);
     await db.execute(_indexNotesNotebook);
     await db.execute(_indexNotesUpdated);
+    await db.execute(_indexNotesRemoteId);
+    await db.execute(_indexNotesRemotePath);
     await db.execute(_indexStrokesNote);
     await db.execute(_indexStrokePointsStroke);
+  }
+
+  /// Forward-only migrations. Each `if` block applies the steps needed to
+  /// reach the next version; SQLite's ALTER TABLE ADD COLUMN is enough for
+  /// the nullable remote_id/remote_path additions in v2.
+  static Future<void> onUpgrade(
+    Database db,
+    int oldVersion,
+    int newVersion,
+  ) async {
+    if (oldVersion < 2) {
+      await db.execute('ALTER TABLE notes ADD COLUMN remote_id TEXT');
+      await db.execute('ALTER TABLE notes ADD COLUMN remote_path TEXT');
+      await db.execute(_indexNotesRemoteId);
+      await db.execute(_indexNotesRemotePath);
+    }
   }
 }

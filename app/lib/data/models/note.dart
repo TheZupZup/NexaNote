@@ -9,6 +9,16 @@ import 'dart:convert';
 /// [syncStatus] values: 'local_only' | 'synced' | 'modified' | 'conflict'
 /// [noteType]   values: 'typed' | 'handwritten' | 'mixed'
 ///
+/// [remoteId] is the stable identifier the WebDAV/NAS source of truth uses
+/// for this note (the frontmatter `id` for notes with NexaNote frontmatter,
+/// or the synthetic `md.<base64>` id for plain Markdown files dropped in by
+/// the user). When set it lets the sync engine adopt the remote .md file
+/// instead of creating a duplicate.
+///
+/// [remotePath] is the relative path of the canonical .md file on the
+/// remote (e.g. `notes/Hello World.md`). Stored so renames on disk can be
+/// followed without losing the link.
+///
 /// Mirrors Note in nexanote/models/note.py.
 class Note {
   final String id;
@@ -21,6 +31,8 @@ class Note {
   final bool isArchived;
   final bool isDeleted;
   final String syncStatus;
+  final String? remoteId;
+  final String? remotePath;
   final DateTime createdAt;
   final DateTime updatedAt;
 
@@ -35,6 +47,8 @@ class Note {
     this.isArchived = false,
     this.isDeleted = false,
     this.syncStatus = 'local_only',
+    this.remoteId,
+    this.remotePath,
     required this.createdAt,
     required this.updatedAt,
   });
@@ -53,6 +67,8 @@ class Note {
       isArchived: ((map['is_archived'] as int?) ?? 0) == 1,
       isDeleted: ((map['is_deleted'] as int?) ?? 0) == 1,
       syncStatus: (map['sync_status'] as String?) ?? 'local_only',
+      remoteId: map['remote_id'] as String?,
+      remotePath: map['remote_path'] as String?,
       createdAt: DateTime.parse(map['created_at'] as String),
       updatedAt: DateTime.parse(map['updated_at'] as String),
     );
@@ -70,12 +86,16 @@ class Note {
       'is_archived': isArchived ? 1 : 0,
       'is_deleted': isDeleted ? 1 : 0,
       'sync_status': syncStatus,
+      'remote_id': remoteId,
+      'remote_path': remotePath,
       'created_at': createdAt.toIso8601String(),
       'updated_at': updatedAt.toIso8601String(),
     };
   }
 
   Note copyWith({
+    String? notebookId,
+    bool clearNotebookId = false,
     String? title,
     String? noteType,
     List<String>? tags,
@@ -84,11 +104,14 @@ class Note {
     bool? isArchived,
     bool? isDeleted,
     String? syncStatus,
+    String? remoteId,
+    String? remotePath,
     DateTime? updatedAt,
   }) {
     return Note(
       id: id,
-      notebookId: notebookId,
+      notebookId:
+          clearNotebookId ? null : (notebookId ?? this.notebookId),
       title: title ?? this.title,
       noteType: noteType ?? this.noteType,
       tags: tags ?? this.tags,
@@ -97,6 +120,8 @@ class Note {
       isArchived: isArchived ?? this.isArchived,
       isDeleted: isDeleted ?? this.isDeleted,
       syncStatus: syncStatus ?? this.syncStatus,
+      remoteId: remoteId ?? this.remoteId,
+      remotePath: remotePath ?? this.remotePath,
       createdAt: createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
     );
