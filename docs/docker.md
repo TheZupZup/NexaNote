@@ -24,7 +24,7 @@ You do **not** need Python or Flutter installed on the host.
 
 ---
 
-## Quick start
+## Quick start (from source)
 
 From the project root:
 
@@ -38,6 +38,25 @@ This will:
 2. Start the `nexanote-backend` service in the background.
 3. Create a local `./data` folder that holds the SQLite database, notes, and
    sync configuration.
+
+## Quick start (from Docker Hub)
+
+If you don't want to clone the repo, just pull the prebuilt image:
+
+```bash
+docker pull thezupzup/nexanote-backend:latest
+
+docker run -d \
+  --name nexanote-backend \
+  -p 8766:8766 \
+  -p 8765:8765 \
+  -v /path/on/host/nexanote-data:/data \
+  --restart unless-stopped \
+  thezupzup/nexanote-backend:latest
+```
+
+Replace `/path/on/host/nexanote-data` with the directory where you want your
+notes to live on the host.
 
 Check it is running:
 
@@ -54,6 +73,39 @@ To (re)build the image without starting it:
 ```bash
 docker compose build
 ```
+
+Or build the image directly with `docker build`:
+
+```bash
+docker build -t thezupzup/nexanote-backend:latest .
+```
+
+You can also tag a specific version alongside `latest`:
+
+```bash
+docker build \
+  -t thezupzup/nexanote-backend:latest \
+  -t thezupzup/nexanote-backend:0.1.0 \
+  .
+```
+
+---
+
+## Publish to Docker Hub
+
+Maintainers only — most users do not need this.
+
+```bash
+docker login
+
+docker push thezupzup/nexanote-backend:latest
+# and any version tags you built
+docker push thezupzup/nexanote-backend:0.1.0
+```
+
+The image name follows the convention `thezupzup/nexanote-backend:<tag>`.
+Use `latest` for the rolling release and `MAJOR.MINOR.PATCH` for pinned
+versions.
 
 ---
 
@@ -99,6 +151,46 @@ docker compose up -d --build
 
 Compose will rebuild the image and restart the container. The `./data` volume
 keeps your notes and configuration.
+
+---
+
+## Running on a NAS (Synology, Ugreen, etc.)
+
+Most NAS systems have a Docker / Container Manager UI that can pull an image
+from Docker Hub and run it from a `docker-compose.yml`. NexaNote works the
+same way as Plex or Jellyfin — pull the image, mount a data folder, expose the
+ports.
+
+Example `docker-compose.yml` to drop into your NAS:
+
+```yaml
+services:
+  nexanote-backend:
+    image: thezupzup/nexanote-backend:latest
+    container_name: nexanote-backend
+    ports:
+      - "8766:8766"
+      - "8765:8765"
+    volumes:
+      - /volume2/docker/nexanote/data:/data
+    restart: unless-stopped
+```
+
+Adjust the host path (`/volume2/docker/nexanote/data` above) to match where
+your NAS stores Docker app data:
+
+- **Synology**: typically `/volume1/docker/nexanote/data`
+- **Ugreen (UGOS Pro)**: typically `/volume2/docker/nexanote/data`
+- **TrueNAS / generic Linux**: any directory you control
+
+Then start it:
+
+```bash
+docker compose up -d
+```
+
+To override the WebDAV credentials, add an `environment:` block (see
+[Configuration](#configuration) below).
 
 ---
 
