@@ -93,4 +93,113 @@ void main() {
       expect(ServerUrl.tryParse('ftp://example.com'), isNull);
     });
   });
+
+  group('ServerUrl.isSecure', () {
+    test('is true for https URLs', () {
+      expect(ServerUrl.parse('https://example.com').isSecure, isTrue);
+    });
+
+    test('is false for http URLs (including local)', () {
+      expect(ServerUrl.parse('http://example.com').isSecure, isFalse);
+      expect(ServerUrl.parse('http://192.168.1.10:8766').isSecure, isFalse);
+    });
+  });
+
+  group('ServerUrl.isLocalNetwork', () {
+    test('is true for the documented private IPv4 ranges', () {
+      expect(
+        ServerUrl.parse('http://192.168.1.10:8766').isLocalNetwork,
+        isTrue,
+      );
+      expect(ServerUrl.parse('http://10.0.0.5').isLocalNetwork, isTrue);
+      expect(ServerUrl.parse('http://10.255.255.254').isLocalNetwork, isTrue);
+      expect(ServerUrl.parse('http://172.16.0.1').isLocalNetwork, isTrue);
+      expect(ServerUrl.parse('http://172.20.5.5').isLocalNetwork, isTrue);
+      expect(ServerUrl.parse('http://172.31.255.254').isLocalNetwork, isTrue);
+    });
+
+    test('is false for IPs adjacent to the private ranges', () {
+      expect(ServerUrl.parse('http://172.15.0.1').isLocalNetwork, isFalse);
+      expect(ServerUrl.parse('http://172.32.0.1').isLocalNetwork, isFalse);
+      expect(ServerUrl.parse('http://192.169.1.1').isLocalNetwork, isFalse);
+      expect(ServerUrl.parse('http://11.0.0.1').isLocalNetwork, isFalse);
+    });
+
+    test('is true for loopback and conventional local hostnames', () {
+      expect(ServerUrl.parse('http://127.0.0.1:8766').isLocalNetwork, isTrue);
+      expect(ServerUrl.parse('http://127.5.5.5').isLocalNetwork, isTrue);
+      expect(ServerUrl.parse('http://localhost:8766').isLocalNetwork, isTrue);
+      expect(ServerUrl.parse('http://my-nas.local').isLocalNetwork, isTrue);
+    });
+
+    test('is true for IPv4 link-local 169.254/16', () {
+      expect(ServerUrl.parse('http://169.254.10.1').isLocalNetwork, isTrue);
+    });
+
+    test('is true for IPv6 loopback / unique-local / link-local', () {
+      expect(ServerUrl.parse('http://[::1]:8080').isLocalNetwork, isTrue);
+      expect(ServerUrl.parse('http://[fc00::1]').isLocalNetwork, isTrue);
+      expect(ServerUrl.parse('http://[fd12:3456::1]').isLocalNetwork, isTrue);
+      expect(ServerUrl.parse('http://[fe80::1]').isLocalNetwork, isTrue);
+    });
+
+    test('is false for public domain names', () {
+      expect(
+        ServerUrl.parse('https://nexanote.example.com').isLocalNetwork,
+        isFalse,
+      );
+      expect(ServerUrl.parse('http://example.com').isLocalNetwork, isFalse);
+    });
+  });
+
+  group('ServerUrl.isInsecureRemote', () {
+    test('warns when http is used against a public host', () {
+      expect(
+        ServerUrl.parse('http://example.com').isInsecureRemote,
+        isTrue,
+      );
+      expect(
+        ServerUrl.parse('http://nexanote.example.com:8766').isInsecureRemote,
+        isTrue,
+      );
+    });
+
+    test('does not warn for http against a LAN / loopback / mDNS host', () {
+      expect(
+        ServerUrl.parse('http://192.168.1.10:8766').isInsecureRemote,
+        isFalse,
+      );
+      expect(
+        ServerUrl.parse('http://10.0.0.5').isInsecureRemote,
+        isFalse,
+      );
+      expect(
+        ServerUrl.parse('http://172.16.5.5').isInsecureRemote,
+        isFalse,
+      );
+      expect(
+        ServerUrl.parse('http://127.0.0.1:8766').isInsecureRemote,
+        isFalse,
+      );
+      expect(
+        ServerUrl.parse('http://localhost:8766').isInsecureRemote,
+        isFalse,
+      );
+      expect(
+        ServerUrl.parse('http://my-nas.local').isInsecureRemote,
+        isFalse,
+      );
+    });
+
+    test('does not warn for https, regardless of host', () {
+      expect(
+        ServerUrl.parse('https://nexanote.example.com').isInsecureRemote,
+        isFalse,
+      );
+      expect(
+        ServerUrl.parse('https://192.168.1.10:8766').isInsecureRemote,
+        isFalse,
+      );
+    });
+  });
 }
