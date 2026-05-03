@@ -1,6 +1,13 @@
 """
-NexaNote — Couche de stockage SQLite
-Gère la persistance locale des notes, carnets et pages.
+NexaNote — Couche de stockage SQLite (legacy, lecture seule pour la migration).
+
+EN: Historic SQLite storage. As of v1.0.0 the primary storage is file-based
+    (see nexanote.storage.file_store). This module is kept solely so the
+    migration tool can read pre-v1 databases. New deployments never touch it.
+
+FR: Ancien stockage SQLite. Depuis la v1.0.0 le stockage principal est
+    fichier (voir nexanote.storage.file_store). Conservé uniquement pour
+    permettre à l'outil de migration de lire les bases pré-v1.
 """
 
 from __future__ import annotations

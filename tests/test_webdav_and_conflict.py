@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import pytest
 from nexanote.models.note import InkStroke, Note, Notebook, NoteType, Page, Point, SyncStatus
-from nexanote.storage.database import NexaNoteDB
+from nexanote.storage import FileNoteStore
 from nexanote.sync.conflict import ConflictResolver, ConflictStrategy
 from nexanote.sync.webdav_provider import (
     NexaNoteDAVProvider,
@@ -27,7 +27,7 @@ from nexanote.sync.webdav_provider import (
 
 @pytest.fixture
 def tmp_db(tmp_path):
-    db = NexaNoteDB(tmp_path / "test.db")
+    db = FileNoteStore(tmp_path / "webdav_store")
     yield db
     db.close()
 

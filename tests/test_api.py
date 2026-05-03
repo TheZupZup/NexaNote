@@ -11,7 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from nexanote.models.note import Note, Notebook, NoteType
-from nexanote.storage.database import NexaNoteDB
+from nexanote.storage import FileNoteStore
 from nexanote.api.routes import create_app
 
 
@@ -21,7 +21,7 @@ from nexanote.api.routes import create_app
 
 @pytest.fixture
 def client(tmp_path):
-    db = NexaNoteDB(tmp_path / "test_api.db")
+    db = FileNoteStore(tmp_path / "api_store")
     app = create_app(db)
     with TestClient(app) as c:
         yield c
@@ -30,7 +30,7 @@ def client(tmp_path):
 
 @pytest.fixture
 def client_with_data(tmp_path):
-    db = NexaNoteDB(tmp_path / "test_api_data.db")
+    db = FileNoteStore(tmp_path / "api_data_store")
 
     nb = Notebook(name="Physique quantique", color="#8b5cf6")
     db.save_notebook(nb)

@@ -39,12 +39,18 @@ def run_webdav(host, port, data_dir, username, password):
 
 def run_api(host, port, data_dir):
     import uvicorn
-    from nexanote.storage.database import NexaNoteDB
+    from nexanote.storage import FileNoteStore, run_migration
     from nexanote.api.routes import create_app
 
     data_dir = Path(data_dir)
     data_dir.mkdir(parents=True, exist_ok=True)
-    db = NexaNoteDB(data_dir / "nexanote.db")
+    # Auto-migrate any pre-v1 SQLite database before opening the file store.
+    report = run_migration(data_dir)
+    if report.ran:
+        logger.info(report.summary())
+        if report.backup_path:
+            logger.info(f"Legacy SQLite backup kept at: {report.backup_path}")
+    db = FileNoteStore(data_dir)
     app = create_app(db)
 
     logger.info(f"API REST démarrée sur http://{host}:{port}")
@@ -68,7 +74,8 @@ def main():
 
     print("""
 ╔══════════════════════════════════════════╗
-║          NexaNote Backend v0.1           ║
+║         NexaNote Backend v1.0.0          ║
+║       file-based storage (Markdown)      ║
 ╚══════════════════════════════════════════╝
 """)
 

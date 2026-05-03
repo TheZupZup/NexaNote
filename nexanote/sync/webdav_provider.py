@@ -26,7 +26,7 @@ from wsgidav.dav_provider import DAVCollection, DAVNonCollection, DAVProvider
 from wsgidav.dav_error import DAVError, HTTP_FORBIDDEN, HTTP_NOT_FOUND
 
 from nexanote.models.note import InkStroke, Note, Notebook, NoteType, Page, Point
-from nexanote.storage.database import NexaNoteDB
+from nexanote.storage.file_store import FileNoteStore
 
 logger = logging.getLogger("nexanote.webdav")
 
@@ -54,7 +54,7 @@ class RootCollection(DAVCollection):
     URL : /
     """
 
-    def __init__(self, path: str, environ: dict, db: NexaNoteDB) -> None:
+    def __init__(self, path: str, environ: dict, db: FileNoteStore) -> None:
         super().__init__(path, environ)
         self.db = db
 
@@ -87,7 +87,7 @@ class NotebookCollection(DAVCollection):
         self,
         path: str,
         environ: dict,
-        db: NexaNoteDB,
+        db: FileNoteStore,
         notebook: Notebook,
     ) -> None:
         super().__init__(path, environ)
@@ -151,7 +151,7 @@ class NoteCollection(DAVCollection):
         self,
         path: str,
         environ: dict,
-        db: NexaNoteDB,
+        db: FileNoteStore,
         note: Note,
     ) -> None:
         super().__init__(path, environ)
@@ -215,7 +215,7 @@ class NoteMetaFile(DAVNonCollection):
         self,
         path: str,
         environ: dict,
-        db: NexaNoteDB,
+        db: FileNoteStore,
         note: Note,
     ) -> None:
         super().__init__(path, environ)
@@ -262,7 +262,7 @@ class NoteMetaFile(DAVNonCollection):
 class _NoteMetaWriter(io.RawIOBase):
     """Buffer d'écriture pour note.json — applique les changements à la DB."""
 
-    def __init__(self, db: NexaNoteDB, note: Note) -> None:
+    def __init__(self, db: FileNoteStore, note: Note) -> None:
         self.db = db
         self.note = note
         self._buf = io.BytesIO()
@@ -310,7 +310,7 @@ class InkFile(DAVNonCollection):
         self,
         path: str,
         environ: dict,
-        db: NexaNoteDB,
+        db: FileNoteStore,
         page: Page,
         note: Note,
     ) -> None:
@@ -369,7 +369,7 @@ class InkFile(DAVNonCollection):
 class _InkWriter(io.RawIOBase):
     """Buffer d'écriture pour page_N.ink — reconstruit les strokes depuis le JSON reçu."""
 
-    def __init__(self, db: NexaNoteDB, page: Page, note: Note) -> None:
+    def __init__(self, db: FileNoteStore, page: Page, note: Note) -> None:
         self.db = db
         self.page = page
         self.note = note
@@ -427,7 +427,7 @@ class NexaNoteDAVProvider(DAVProvider):
     Enregistré dans le serveur WsgiDAV.
     """
 
-    def __init__(self, db: NexaNoteDB) -> None:
+    def __init__(self, db: FileNoteStore) -> None:
         super().__init__()
         self.db = db
         self.readonly = False

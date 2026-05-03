@@ -13,7 +13,7 @@ All design decisions and direction are fully human-driven.
 ---
 ## What works today
 
-- Typed notes with Markdown formatting
+- Typed notes stored as plain Markdown files (Obsidian-style)
 - Handwritten notes with stylus or mouse (pen, highlighter, eraser, pressure sensitivity)
 - Notebooks to organize your notes
 - WebDAV sync with your NAS, Nextcloud, or any WebDAV server
@@ -39,7 +39,7 @@ See [docs/android-roadmap.md](docs/android-roadmap.md) for the full Android & S2
 
 NexaNote uses two components that work together:
 
-- **Python backend** — handles storage (SQLite), REST API, and WebDAV sync server
+- **Python backend** — handles storage (file-based, Markdown), REST API, and WebDAV sync server
 - **Flutter app** — the interface, runs on Linux desktop and Android (coming soon)
 
 ```
@@ -48,7 +48,7 @@ NexaNote/
 ├── requirements.txt
 ├── nexanote/                # Python backend
 │   ├── models/              # Data models
-│   ├── storage/             # SQLite layer
+│   ├── storage/             # File-based store (Markdown + JSON) + SQLite migration
 │   ├── sync/                # WebDAV server + sync engine + conflict resolution
 │   └── api/                 # REST API (FastAPI)
 ├── app/                     # Flutter app
@@ -56,8 +56,29 @@ NexaNote/
 │       ├── screens/         # UI screens
 │       ├── widgets/         # Reusable widgets (ink canvas, notes list...)
 │       └── services/        # API client, app state
-└── tests/                   # 64 tests
+└── tests/                   # 100+ tests
 ```
+
+### Storage layout (v1.0.0+)
+
+Notes are plain files on disk, Obsidian-style:
+
+```
+<data_dir>/
+├── notebooks/<notebook_id>.yaml      # Notebook metadata (YAML)
+├── notes/<note_id>.md                # Markdown body + YAML frontmatter
+└── drawings/<note_id>.json           # Stylus strokes (one file per note)
+```
+
+Each note's frontmatter carries `title`, `tags`, `created_at`, `updated_at`,
+plus the metadata the app needs (id, notebook_id, page list, sync_status).
+Single-page notes have a clean body with no NexaNote-specific markers, so
+they can be opened/edited directly in Obsidian or any Markdown editor.
+
+A pre-v1.0.0 SQLite database (`nexanote.db`) is detected on first startup
+and migrated automatically — the original DB is renamed to
+`nexanote.db.legacy_backup` and kept in place. See
+[`CHANGELOG.md`](CHANGELOG.md) for details.
 
 ---
 
@@ -147,7 +168,7 @@ Tested with Ugreen NAS (UGOS Pro). Should work with any WebDAV-compatible server
 python -m pytest tests/ -v
 ```
 
-64 tests covering models, database, WebDAV provider, conflict resolution, and REST API.
+100+ tests covering models, file-based storage, SQLite → file migration, WebDAV provider, conflict resolution, and REST API.
 
 ---
 
