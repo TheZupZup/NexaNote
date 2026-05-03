@@ -92,8 +92,10 @@ class _ConnectScreenState extends State<ConnectScreen> {
                     hintText: 'http://127.0.0.1:8766',
                     prefixIcon: Icon(Icons.dns_outlined),
                   ),
+                  onChanged: (_) => setState(() {}),
                   onSubmitted: (_) => _connect(),
                 ),
+                _SecurityHint(rawUrl: _controller.text),
                 const SizedBox(height: 16),
 
                 // Error
@@ -266,4 +268,65 @@ class _ConnectScreenState extends State<ConnectScreen> {
               fontFamily: 'monospace', fontSize: 12, color: Color(0xFF6366F1)),
         ),
       );
+}
+
+/// Renders either a warning ("you're sending traffic in cleartext to a remote
+/// host — consider HTTPS") or a small "Secure connection" badge, based on the
+/// scheme and whether the host is on the local network. Renders nothing when
+/// the URL is incomplete or invalid so we don't nag while the user is typing.
+class _SecurityHint extends StatelessWidget {
+  final String rawUrl;
+  const _SecurityHint({required this.rawUrl});
+
+  @override
+  Widget build(BuildContext context) {
+    final ServerUrl url;
+    try {
+      url = ServerUrl.parse(rawUrl);
+    } on FormatException {
+      return const SizedBox.shrink();
+    }
+
+    final scheme = Theme.of(context).colorScheme;
+
+    if (url.isInsecureRemote) {
+      return Padding(
+        padding: const EdgeInsets.only(top: 8),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(Icons.lock_open_outlined,
+                size: 14, color: scheme.tertiary),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Text(
+                'You are using an insecure connection. '
+                'Consider using HTTPS for remote access.',
+                style: TextStyle(fontSize: 12, color: scheme.tertiary),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    if (url.isSecure) {
+      return Padding(
+        padding: const EdgeInsets.only(top: 8),
+        child: Row(
+          children: [
+            Icon(Icons.lock_outline, size: 14, color: Colors.green.shade700),
+            const SizedBox(width: 6),
+            Text(
+              'Secure connection',
+              style:
+                  TextStyle(fontSize: 12, color: Colors.green.shade700),
+            ),
+          ],
+        ),
+      );
+    }
+
+    return const SizedBox.shrink();
+  }
 }

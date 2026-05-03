@@ -12,6 +12,28 @@ class ServerUrl {
 
   const ServerUrl._(this.value);
 
+  /// The URL scheme in lowercase — `http` or `https`.
+  String get scheme => Uri.parse(value).scheme.toLowerCase();
+
+  /// The URL host (lowercased), or an empty string if missing.
+  String get host => Uri.parse(value).host.toLowerCase();
+
+  /// Whether this URL uses HTTPS.
+  bool get isSecure => scheme == 'https';
+
+  /// Whether the host is on the local machine or a private network. Covers
+  /// IPv4 loopback (127.0.0.0/8), private ranges (10/8, 172.16/12,
+  /// 192.168/16), link-local (169.254/16), the IPv6 loopback (::1),
+  /// IPv6 unique-local (fc00::/7) and link-local (fe80::/10), the
+  /// `localhost` hostname, and mDNS `*.local` names. Used to decide whether
+  /// plain HTTP is acceptable.
+  bool get isLocalNetwork => isLocalHost(host);
+
+  /// True for non-local HTTP URLs — i.e. remote connections that would send
+  /// traffic over cleartext. The UI uses this to nudge the user toward HTTPS
+  /// without forcing it.
+  bool get isInsecureRemote => !isSecure && !isLocalNetwork;
+
   /// Parses [input] and returns a normalized [ServerUrl].
   ///
   /// Throws [FormatException] with a message safe to show to the user when
@@ -68,6 +90,40 @@ class ServerUrl {
       end--;
     }
     return s.substring(0, end);
+  }
+
+  /// Returns true if [host] refers to the local machine or a private LAN.
+  /// Exposed for callers that want to classify a host string directly,
+  /// without first parsing a full URL.
+  static bool isLocalHost(String host) {
+    final h = host.toLowerCase();
+    if (h.isEmpty) return false;
+    if (h == 'localhost' || h.endsWith('.local')) return true;
+    if (h == '::1') return true;
+    // IPv6 unique-local fc00::/7 (fc.. / fd..) and link-local fe80::/10.
+    if (h.startsWith('fc') || h.startsWith('fd')) return true;
+    if (h.startsWith('fe8') ||
+        h.startsWith('fe9') ||
+        h.startsWith('fea') ||
+        h.startsWith('feb')) {
+      return true;
+    }
+    final parts = h.split('.');
+    if (parts.length != 4) return false;
+    final octets = <int>[];
+    for (final part in parts) {
+      final n = int.tryParse(part);
+      if (n == null || n < 0 || n > 255) return false;
+      octets.add(n);
+    }
+    final a = octets[0];
+    final b = octets[1];
+    if (a == 127) return true; // 127.0.0.0/8 loopback
+    if (a == 10) return true; // 10.0.0.0/8
+    if (a == 192 && b == 168) return true; // 192.168.0.0/16
+    if (a == 172 && b >= 16 && b <= 31) return true; // 172.16.0.0/12
+    if (a == 169 && b == 254) return true; // 169.254.0.0/16 link-local
+    return false;
   }
 
   @override
