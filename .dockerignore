@@ -1,0 +1,44 @@
+# VCS
+.git
+.gitignore
+.github
+
+# Flutter app (not needed for backend image)
+app/
+
+# Python caches and virtualenvs
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+.eggs/
+*.egg-info/
+
+# Tests and coverage
+tests/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Local data and secrets
+data/
+*.db
+*.sqlite
+*.sqlite3
+.env
+.env.*
+
+# Docs and shell helpers (not needed inside the image)
+docs/
+*.md
+launch_app.sh
+nexanote.sh

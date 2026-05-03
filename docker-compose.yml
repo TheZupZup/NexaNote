@@ -1,0 +1,18 @@
+services:
+  nexanote-backend:
+    build: .
+    container_name: nexanote-backend
+    ports:
+      - "8766:8766"
+      - "8765:8765"
+    volumes:
+      - ./data:/data
+    environment:
+      NEXANOTE_HOST: 0.0.0.0
+      NEXANOTE_API_PORT: 8766
+      NEXANOTE_WEBDAV_PORT: 8765
+      NEXANOTE_DATA_DIR: /data
+      # Override these in a local .env file (do not commit secrets).
+      NEXANOTE_USERNAME: ${NEXANOTE_USERNAME:-nexanote}
+      NEXANOTE_PASSWORD: ${NEXANOTE_PASSWORD:-nexanote}
+    restart: unless-stopped
