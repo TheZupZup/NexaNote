@@ -170,10 +170,170 @@ def _marker_payload(**fields) -> str:
     return json.dumps(fields, indent=2)
 
 
+# ---------------------------------------------------------------------------
+# YAML → plain Markdown migration
+# ---------------------------------------------------------------------------
+
+PLAIN_MIGRATION_MARKER = ".nexanote_plain_migrated"
+PLAIN_BACKUP_DIR = "_yaml_backup"
+
+
+@dataclass
+class PlainMigrationReport:
+    """Summary of a YAML → plain-Markdown migration run."""
+
+    ran: bool = False
+    notebooks: int = 0
+    notes: int = 0
+    pages: int = 0
+    strokes: int = 0
+    errors: list[str] = None  # type: ignore[assignment]
+    backup_dir: Optional[Path] = None
+    skipped_reason: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if self.errors is None:
+            self.errors = []
+
+    def summary(self) -> str:
+        if not self.ran:
+            return f"Plain-MD migration skipped: {self.skipped_reason or 'unknown'}"
+        return (
+            f"Plain-MD migration done — {self.notebooks} notebooks, "
+            f"{self.notes} notes, {self.pages} pages, {self.strokes} strokes"
+            + (f" ({len(self.errors)} errors)" if self.errors else "")
+        )
+
+
+def migrate_yaml_to_plain(
+    data_dir: Path,
+    backup: bool = True,
+) -> PlainMigrationReport:
+    """
+    EN: Convert a YAML-frontmatter store at `data_dir` into the plain
+        Markdown + JSON-sidecar layout in the same directory. The original
+        YAML notes are moved to ``<data_dir>/notes/_yaml_backup/`` so the
+        operation is reversible. Idempotent — a marker prevents double runs.
+
+        After migration, ``backend.create_store`` returns a
+        ``PlainMarkdownNoteStore`` for this directory.
+
+    FR: Convertit un store YAML en stockage Markdown brut + sidecar JSON
+        dans le même dossier. Les fichiers YAML originaux sont sauvegardés
+        dans ``notes/_yaml_backup/``. Idempotent.
+    """
+    from nexanote.storage.backend import (
+        MODE_PLAIN,
+        write_mode_marker,
+    )
+    from nexanote.storage.file_store import FileNoteStore
+    from nexanote.storage.plain_store import PlainMarkdownNoteStore
+
+    data_dir = Path(data_dir)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    marker = data_dir / PLAIN_MIGRATION_MARKER
+
+    report = PlainMigrationReport()
+
+    if marker.exists():
+        report.skipped_reason = "already migrated to plain-MD (marker present)"
+        return report
+
+    yaml_store = FileNoteStore(data_dir)
+    notes_dir = yaml_store.notes_dir
+
+    # Snapshot the YAML-format files BEFORE swapping the backend, so the
+    # plain store doesn't see them as foreign sidecars.
+    yaml_md_files = sorted(notes_dir.glob("*.md"))
+    if not yaml_md_files:
+        # Nothing to migrate, but still pin the mode + marker so the user's
+        # next start opens the plain backend.
+        write_mode_marker(data_dir, MODE_PLAIN)
+        marker.write_text(_marker_payload(reason="empty store"), encoding="utf-8")
+        report.skipped_reason = "no YAML notes to convert"
+        return report
+
+    backup_dir: Optional[Path] = None
+    if backup:
+        backup_dir = notes_dir / PLAIN_BACKUP_DIR
+        backup_dir.mkdir(parents=True, exist_ok=True)
+
+    # Read every note from the YAML store (with pages + strokes) before
+    # we start writing — avoids reading half-converted files.
+    notes: list = []
+    for meta in yaml_store.list_notes(include_deleted=True, include_archived=True):
+        full = yaml_store.get_note(meta.id, load_pages=True)
+        if full is not None:
+            notes.append((full, yaml_store._note_path(full.id)))
+
+    notebooks = list(yaml_store.list_notebooks(include_archived=True))
+    yaml_store.close()
+
+    plain_store = PlainMarkdownNoteStore(data_dir)
+
+    for nb in notebooks:
+        try:
+            plain_store.save_notebook(nb)
+            report.notebooks += 1
+        except Exception as exc:  # pragma: no cover — defensive
+            msg = f"notebook {nb.id[:8]}: {exc}"
+            logger.error(f"plain migration failed: {msg}")
+            report.errors.append(msg)
+
+    for note, original_path in notes:
+        try:
+            # Move the original YAML-format .md aside so the plain writer
+            # never sees its frontmatter as a stray plain MD file.
+            if backup_dir is not None and original_path.exists():
+                target = backup_dir / original_path.name
+                try:
+                    original_path.replace(target)
+                except OSError as exc:
+                    logger.warning(
+                        f"could not back up {original_path} → {target}: {exc}"
+                    )
+            else:
+                try:
+                    original_path.unlink()
+                except FileNotFoundError:
+                    pass
+
+            plain_store.save_note(note)
+            report.notes += 1
+            report.pages += len(note.pages)
+            for page in note.pages:
+                report.strokes += len(page.strokes)
+        except Exception as exc:  # pragma: no cover — defensive
+            msg = f"note {note.id[:8]}: {exc}"
+            logger.error(f"plain migration failed: {msg}")
+            report.errors.append(msg)
+
+    write_mode_marker(data_dir, MODE_PLAIN)
+    marker.write_text(
+        _marker_payload(
+            reason="migrated YAML → plain",
+            notebooks=report.notebooks,
+            notes=report.notes,
+            pages=report.pages,
+            strokes=report.strokes,
+        ),
+        encoding="utf-8",
+    )
+
+    report.ran = True
+    report.backup_dir = backup_dir
+    logger.info(report.summary())
+    return report
+
+
 __all__ = [
     "MigrationReport",
+    "PlainMigrationReport",
     "needs_migration",
     "run_migration",
+    "migrate_yaml_to_plain",
     "LEGACY_DB_NAME",
     "MIGRATION_MARKER",
+    "PLAIN_BACKUP_DIR",
+    "PLAIN_MIGRATION_MARKER",
 ]
