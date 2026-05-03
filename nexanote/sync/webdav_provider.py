@@ -16,6 +16,7 @@ rclone, Cyberduck…) de parcourir et synchroniser les notes.
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import logging
@@ -122,14 +123,25 @@ def _epoch(dt: datetime) -> float:
     return dt.replace(tzinfo=timezone.utc).timestamp()
 
 
-def _safe_etag(dt: datetime) -> str:
+def _safe_etag(*parts: object) -> str:
     """
-    EN: Return an ETag token for ``dt`` that satisfies WsgiDAV's rules:
-        no surrounding quotes, no embedded quotes, not a weak tag. WsgiDAV
-        wraps it in quotes when emitting the header.
-    FR: Token ETag conforme à WsgiDAV (sans guillemets, ni W/).
+    EN: Return a strong ETag token derived from the given identity ``parts``
+        (id, page number, last-modified timestamp…). WsgiDAV's ``checked_etag``
+        rejects values containing ``"`` or starting with ``W/``; we return a
+        sha256 hex digest, which is guaranteed quote-free. WsgiDAV wraps the
+        token in quotes when emitting the header — never pre-quote it here.
+    FR: Token ETag fort à partir d'éléments d'identité (sha256 hexa). Jamais
+        de guillemets : WsgiDAV les ajoute lui-même.
     """
-    return dt.replace(tzinfo=timezone.utc).isoformat().replace('"', "")
+    h = hashlib.sha256()
+    for part in parts:
+        if isinstance(part, datetime):
+            value = part.replace(tzinfo=timezone.utc).isoformat()
+        else:
+            value = str(part)
+        h.update(value.encode("utf-8"))
+        h.update(b"\x1f")
+    return h.hexdigest()
 
 
 def _safe_dav_error(exc: BaseException, default_msg: str) -> DAVError:
@@ -471,11 +483,11 @@ class NoteMetaFile(DAVNonCollection):
         return True
 
     def get_etag(self) -> Optional[str]:
-        # WsgiDAV's `checked_etag` rejects values containing quotes — return
-        # the raw token; the framework adds the surrounding quotes for the
-        # ETag header itself. Returning a pre-quoted value used to crash
-        # WsgiDAV with a 500 on PUT to existing notes (e.g. the welcome note).
-        return _safe_etag(self.note.updated_at)
+        # WsgiDAV's `checked_etag` rejects values containing quotes — never
+        # pre-quote here; the framework wraps the token in quotes for the
+        # header. A raw ISO timestamp also worked, but a sha256 of the note
+        # identity changes only when something a client cares about changed.
+        return _safe_etag("note", self.note.id, self.note.updated_at)
 
     def __init__(
         self,
@@ -636,7 +648,9 @@ class InkFile(DAVNonCollection):
         return True
 
     def get_etag(self) -> Optional[str]:
-        return _safe_etag(self.page.updated_at)
+        return _safe_etag(
+            "ink", self.page.note_id, self.page.page_number, self.page.updated_at
+        )
 
     def __init__(
         self,

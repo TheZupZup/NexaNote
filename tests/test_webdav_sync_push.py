@@ -763,3 +763,202 @@ class TestPushSerializationFailures:
         assert "Bad note" in msg
         assert "serialization failed" in msg
         assert "simulated serialization bug" in msg
+
+
+# ---------------------------------------------------------------------------
+# ETag regression — WsgiDAV crashed on PUT when get_etag returned a quoted
+# ISO timestamp ("\"2026-…\""). Lock down the contract: never quoted, never
+# weak, always survives WsgiDAV's `checked_etag` validator.
+# ---------------------------------------------------------------------------
+
+
+class TestEtagFormat:
+    """Hash-based ETags must satisfy WsgiDAV's `checked_etag`."""
+
+    def _setup_note(self, tmp_path):
+        db = FileNoteStore(tmp_path / "etag_store")
+        nb = Notebook(name="Notebook")
+        db.save_notebook(nb)
+        note = Note(notebook_id=nb.id, title="Note", note_type=NoteType.TYPED)
+        note.add_page()
+        db.save_note(note)
+        provider = NexaNoteDAVProvider(db)
+        environ = _make_environ(provider)
+        return db, db.get_note(note.id, load_pages=True), environ
+
+    def test_note_meta_etag_passes_wsgidav_checked_etag(self, tmp_path):
+        from wsgidav.util import checked_etag
+
+        from nexanote.sync.webdav_provider import NoteMetaFile
+
+        db, note, environ = self._setup_note(tmp_path)
+        meta = NoteMetaFile("/x/y/note.json", environ, db, note)
+        etag = meta.get_etag()
+        # WsgiDAV would otherwise raise ValueError on a quoted/weak token.
+        assert checked_etag(etag) == etag
+
+    def test_ink_etag_passes_wsgidav_checked_etag(self, tmp_path):
+        from wsgidav.util import checked_etag
+
+        from nexanote.sync.webdav_provider import InkFile
+
+        db, note, environ = self._setup_note(tmp_path)
+        page = note.pages[0]
+        ink = InkFile("/x/y/page_1.ink", environ, db, page, note)
+        etag = ink.get_etag()
+        assert checked_etag(etag) == etag
+
+    def test_etag_is_never_quoted(self, tmp_path):
+        from nexanote.sync.webdav_provider import InkFile, NoteMetaFile
+
+        db, note, environ = self._setup_note(tmp_path)
+        meta_etag = NoteMetaFile("/p", environ, db, note).get_etag()
+        ink_etag = InkFile("/p", environ, db, note.pages[0], note).get_etag()
+
+        for etag in (meta_etag, ink_etag):
+            assert etag, "etag must be a non-empty token"
+            assert '"' not in etag, f"etag must not contain quotes: {etag!r}"
+            assert not etag.startswith("'") and not etag.endswith("'"), etag
+            assert not etag.startswith("W/"), "weak etags are rejected by WsgiDAV"
+            # A quoted-then-stripped token would still leak surrounding
+            # whitespace; hex digests can't.
+            assert etag == etag.strip()
+
+    def test_etag_changes_when_content_changes(self, tmp_path):
+        from nexanote.sync.webdav_provider import NoteMetaFile
+
+        db, note, environ = self._setup_note(tmp_path)
+        before = NoteMetaFile("/p", environ, db, note).get_etag()
+        # Force a measurable timestamp delta — `touch()` quantizes to ~µs but
+        # consecutive calls can land in the same tick on fast machines.
+        import time
+        time.sleep(0.001)
+        note.touch()
+        after = NoteMetaFile("/p", environ, db, note).get_etag()
+        assert before != after
+
+    def test_safe_etag_helper_handles_mixed_inputs(self):
+        from nexanote.sync.webdav_provider import _safe_etag
+
+        from datetime import datetime, timezone
+
+        now = datetime(2026, 5, 3, 8, 49, 9, 990410, tzinfo=timezone.utc)
+        token = _safe_etag("note", "abc", now, 1)
+        assert '"' not in token
+        assert token == _safe_etag("note", "abc", now, 1)  # deterministic
+        assert token != _safe_etag("note", "abc", now, 2)  # part-sensitive
+
+
+class TestLivePutNoCrashOnEtag:
+    """
+    EN: Reproduce the exact crash from the bug report — PUT on note.json and
+        page_1.ink against a note whose ETag previously rendered as
+        ``""<iso>""``. WsgiDAV's `checked_etag` would raise ValueError → 500.
+        With a hash-based ETag, both PUTs succeed end-to-end.
+    """
+
+    def _seed_note_via_mkcol(self, url, auth):
+        nb_slug = "etag-nb__c0ffee01"
+        note_slug = "etag-note__c0ffee02"
+        for path in (nb_slug, f"{nb_slug}/{note_slug}"):
+            resp = requests.request("MKCOL", f"{url}{path}", auth=auth, timeout=5)
+            assert resp.status_code in (201, 405), resp.text
+        return nb_slug, note_slug
+
+    def test_put_note_json_does_not_crash_on_etag(self, live_server):
+        url = live_server["url"]
+        auth = HTTPBasicAuth(live_server["username"], live_server["password"])
+        nb_slug, note_slug = self._seed_note_via_mkcol(url, auth)
+
+        payload = {
+            "id": "c0ffee02-1111-2222-3333-444455556666",
+            "title": "Etag note",
+            "type": "typed",
+            "tags": [],
+            "is_pinned": False,
+            "created_at": "2026-05-03T08:49:09.990410+00:00",
+            "updated_at": "2026-05-03T08:49:09.990410+00:00",
+            "pages": [
+                {"page_number": 1, "template": "blank", "typed_content": "hi"},
+            ],
+        }
+        resp = requests.put(
+            f"{url}{nb_slug}/{note_slug}/note.json",
+            json=payload,
+            auth=auth,
+            timeout=5,
+        )
+        assert resp.status_code in (200, 201, 204), (
+            f"PUT note.json must not 500 on etag — got {resp.status_code}: {resp.text}"
+        )
+
+        # Server is now expected to expose a strong, quote-free ETag.
+        head = requests.request(
+            "HEAD",
+            f"{url}{nb_slug}/{note_slug}/note.json",
+            auth=auth,
+            timeout=5,
+        )
+        if "ETag" in head.headers:
+            etag = head.headers["ETag"]
+            # Header value: WsgiDAV wraps the token in exactly one pair of
+            # quotes. Anything beyond that is double-quoting.
+            assert etag.count('"') == 2, f"etag double-quoted in header: {etag!r}"
+            assert not etag.startswith('""'), f"double-leading-quote: {etag!r}"
+            assert not etag.endswith('""'), f"double-trailing-quote: {etag!r}"
+
+    def test_put_page_1_ink_does_not_crash_on_etag(self, live_server):
+        url = live_server["url"]
+        auth = HTTPBasicAuth(live_server["username"], live_server["password"])
+        nb_slug, note_slug = self._seed_note_via_mkcol(url, auth)
+
+        # Materialise the note first so page_1.ink has a target.
+        meta_payload = {
+            "id": "c0ffee02-9999-aaaa-bbbb-cccccccccccc",
+            "title": "Ink note",
+            "type": "typed",
+            "tags": [],
+            "is_pinned": False,
+            "created_at": "2026-05-03T08:49:09.990410+00:00",
+            "updated_at": "2026-05-03T08:49:09.990410+00:00",
+            "pages": [
+                {"page_number": 1, "template": "blank", "typed_content": ""},
+            ],
+        }
+        resp = requests.put(
+            f"{url}{nb_slug}/{note_slug}/note.json",
+            json=meta_payload,
+            auth=auth,
+            timeout=5,
+        )
+        assert resp.status_code in (200, 201, 204), resp.text
+
+        ink_payload = {
+            "page_id": "page-1",
+            "note_id": meta_payload["id"],
+            "page_number": 1,
+            "template": "blank",
+            "width_px": 800,
+            "height_px": 1200,
+            "updated_at": "2026-05-03T08:49:09.990410+00:00",
+            "strokes": [],
+        }
+        resp = requests.put(
+            f"{url}{nb_slug}/{note_slug}/page_1.ink",
+            json=ink_payload,
+            auth=auth,
+            timeout=5,
+        )
+        assert resp.status_code in (200, 201, 204), (
+            f"PUT page_1.ink must not 500 on etag — got {resp.status_code}: {resp.text}"
+        )
+
+        head = requests.request(
+            "HEAD",
+            f"{url}{nb_slug}/{note_slug}/page_1.ink",
+            auth=auth,
+            timeout=5,
+        )
+        if "ETag" in head.headers:
+            etag = head.headers["ETag"]
+            assert etag.count('"') == 2, f"etag double-quoted in header: {etag!r}"
