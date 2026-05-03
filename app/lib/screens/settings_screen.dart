@@ -4,6 +4,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../services/app_state.dart';
@@ -150,6 +151,36 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ? Colors.red
           : Colors.green;
     });
+  }
+
+  /// Builds a copy/paste-friendly summary of the most recent sync attempt.
+  /// Intentionally excludes NAS URL, username, password, and note content so
+  /// the user can paste this into a bug report safely.
+  String _buildSyncDiagnostics() {
+    final buf = StringBuffer()
+      ..writeln('NexaNote sync diagnostics')
+      ..writeln('Timestamp: ${DateTime.now().toUtc().toIso8601String()}')
+      ..writeln('Error: ${_syncMessage ?? 'unknown'}');
+    if (_syncStatus.isNotEmpty) {
+      buf
+        ..writeln('Pulled: ${_syncStatus['notes_pulled'] ?? 0}')
+        ..writeln('Pushed: ${_syncStatus['notes_pushed'] ?? 0}')
+        ..writeln('Conflicts: ${_syncStatus['conflicts_resolved'] ?? 0}')
+        ..writeln(
+            'Duration: ${(_syncStatus['duration_seconds'] as num?)?.toStringAsFixed(1) ?? '0'}s');
+    }
+    return buf.toString();
+  }
+
+  Future<void> _copySyncDiagnostics() async {
+    await Clipboard.setData(ClipboardData(text: _buildSyncDiagnostics()));
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Diagnostics copied'),
+        duration: Duration(seconds: 2),
+      ),
+    );
   }
 
   void _startAutoSync() {
@@ -344,6 +375,24 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         ],
                       ),
                     ),
+                    if (_syncColor == Colors.red) ...[
+                      const SizedBox(height: 6),
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: TextButton.icon(
+                          onPressed: _copySyncDiagnostics,
+                          icon: const Icon(Icons.copy, size: 14),
+                          label: const Text('Copy diagnostics',
+                              style: TextStyle(fontSize: 12)),
+                          style: TextButton.styleFrom(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 8, vertical: 0),
+                            minimumSize: const Size(0, 28),
+                            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                          ),
+                        ),
+                      ),
+                    ],
                   ],
 
                   // Dernier statut sync
