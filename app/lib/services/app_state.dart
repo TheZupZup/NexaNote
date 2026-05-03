@@ -5,6 +5,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 // classes in data/models reachable through [LocalNoteService].
 import 'api_client.dart' as api;
 import 'local_note_service.dart';
+import 'server_url.dart';
 import 'sync_service.dart';
 import '../data/models/note.dart' as local;
 import '../data/models/notebook.dart' as local;
@@ -13,6 +14,13 @@ typedef ApiClientFactory = api.ApiClient Function(String baseUrl);
 
 /// SharedPreferences key for the user-entered backend URL.
 const String kPrefsApiUrl = 'api_url';
+
+/// SharedPreferences key for an optional WebDAV URL override. When unset, the
+/// app derives the WebDAV URL from [kPrefsApiUrl] by appending `/webdav` —
+/// matching the unified-backend reverse-proxy layout. Advanced users can set
+/// this explicitly (e.g. `http://192.168.1.10:8765`) to keep the legacy
+/// two-port deployment working.
+const String kPrefsWebdavUrlOverride = 'webdav_url_override';
 
 /// SharedPreferences key remembering whether we've ever completed a successful
 /// connection to a backend. Used by the router so a transient API failure on
@@ -24,6 +32,7 @@ class AppState extends ChangeNotifier {
   final ApiClientFactory _clientFactory;
 
   String _apiUrl = 'http://127.0.0.1:8766';
+  String? _webdavUrlOverride;
   bool _isConnected = false;
   bool _isBackendAvailable = false;
   bool _hasEverConnected = false;
@@ -48,6 +57,16 @@ class AppState extends ChangeNotifier {
             clientFactory ?? ((baseUrl) => api.ApiClient(baseUrl: baseUrl));
 
   String get apiUrl => _apiUrl;
+
+  /// The effective WebDAV URL. Returns the user-set override if any, otherwise
+  /// derives from [apiUrl] by appending `/webdav` so a single base URL behind
+  /// a reverse proxy serves both the API (`/`) and WebDAV (`/webdav`).
+  String get webdavUrl =>
+      _webdavUrlOverride ?? ServerUrl.deriveWebdavUrl(_apiUrl);
+
+  /// True when the WebDAV URL is auto-derived from [apiUrl] (no explicit
+  /// override). Used by Settings to show a "derived from API URL" hint.
+  bool get isWebdavUrlDerived => _webdavUrlOverride == null;
   bool get isConnected => _isConnected;
   bool get isBackendAvailable => _isBackendAvailable;
   /// True once the app has successfully reached a backend at least once. The
@@ -78,8 +97,25 @@ class AppState extends ChangeNotifier {
     await initLocal();
     final prefs = await SharedPreferences.getInstance();
     _apiUrl = prefs.getString(kPrefsApiUrl) ?? 'http://127.0.0.1:8766';
+    final override = prefs.getString(kPrefsWebdavUrlOverride);
+    _webdavUrlOverride =
+        (override == null || override.trim().isEmpty) ? null : override;
     _hasEverConnected = prefs.getBool(kPrefsHasEverConnected) ?? false;
     await connect();
+  }
+
+  /// Sets or clears the explicit WebDAV URL override. Pass `null` or a blank
+  /// string to fall back to the derived value (`apiUrl + "/webdav"`).
+  Future<void> setWebdavUrlOverride(String? url) async {
+    final normalized = (url == null || url.trim().isEmpty) ? null : url.trim();
+    _webdavUrlOverride = normalized;
+    final prefs = await SharedPreferences.getInstance();
+    if (normalized == null) {
+      await prefs.remove(kPrefsWebdavUrlOverride);
+    } else {
+      await prefs.setString(kPrefsWebdavUrlOverride, normalized);
+    }
+    notifyListeners();
   }
 
   /// Opens the local SQLite database. Safe to call from tests directly.

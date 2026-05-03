@@ -152,6 +152,60 @@ void main() {
     });
   });
 
+  group('ServerUrl.deriveWebdavUrl', () {
+    test('appends /webdav to a unified base URL', () {
+      expect(
+        ServerUrl.deriveWebdavUrl('https://nexanote.example.com'),
+        'https://nexanote.example.com/webdav',
+      );
+      expect(
+        ServerUrl.deriveWebdavUrl('http://192.168.1.10:8766'),
+        'http://192.168.1.10:8766/webdav',
+      );
+    });
+
+    test('strips trailing slashes before appending', () {
+      expect(
+        ServerUrl.deriveWebdavUrl('https://nexanote.example.com/'),
+        'https://nexanote.example.com/webdav',
+      );
+      expect(
+        ServerUrl.deriveWebdavUrl('http://127.0.0.1:8766///'),
+        'http://127.0.0.1:8766/webdav',
+      );
+    });
+
+    test('does not double-append /webdav if it is already present', () {
+      // Backward compatibility: a user who saved the legacy direct WebDAV
+      // URL ("…/webdav") through manual override should not end up with
+      // "…/webdav/webdav" after a round-trip.
+      expect(
+        ServerUrl.deriveWebdavUrl('https://nexanote.example.com/webdav'),
+        'https://nexanote.example.com/webdav',
+      );
+      expect(
+        ServerUrl.deriveWebdavUrl('https://nexanote.example.com/webdav/'),
+        'https://nexanote.example.com/webdav',
+      );
+    });
+
+    test('the parsed instance exposes apiUrl and webdavUrl getters', () {
+      final url = ServerUrl.parse('https://nexanote.example.com');
+      expect(url.apiUrl, 'https://nexanote.example.com');
+      expect(url.webdavUrl, 'https://nexanote.example.com/webdav');
+    });
+
+    test('preserves a path-prefixed reverse-proxy base URL', () {
+      // A user behind a reverse proxy that serves NexaNote under a sub-path
+      // (e.g. https://example.com/nexanote → API, /nexanote/webdav → WebDAV)
+      // should still get the right WebDAV URL.
+      expect(
+        ServerUrl.deriveWebdavUrl('https://example.com/nexanote'),
+        'https://example.com/nexanote/webdav',
+      );
+    });
+  });
+
   group('ServerUrl.isInsecureRemote', () {
     test('warns when http is used against a public host', () {
       expect(
