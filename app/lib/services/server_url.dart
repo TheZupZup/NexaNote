@@ -5,12 +5,38 @@
 // Cloudflare Tunnel — and rejects blank or malformed input with a clear,
 // user-facing message.
 
+/// Path suffix appended to a unified backend base URL to reach the WebDAV
+/// server when the deployment is fronted by a reverse proxy that routes
+/// `/webdav` to the WebDAV process.
+const String kWebdavPathSuffix = '/webdav';
+
 class ServerUrl {
   /// The normalized URL string. Whitespace and trailing slashes are removed;
   /// the rest of the user's input is preserved as-typed.
   final String value;
 
   const ServerUrl._(this.value);
+
+  /// The REST API URL derived from this base URL. Identity for the unified
+  /// deployment — the API is served at the root of the base URL.
+  String get apiUrl => value;
+
+  /// The WebDAV URL derived from this base URL by appending [kWebdavPathSuffix].
+  /// Use this when the backend is fronted by a reverse proxy that routes
+  /// `/webdav` to the WebDAV process. For legacy two-port deployments
+  /// (`:8765` for WebDAV, `:8766` for API) the user can still enter the
+  /// WebDAV URL directly as an override.
+  String get webdavUrl => deriveWebdavUrl(value);
+
+  /// Returns `base + "/webdav"`, taking care not to double-append the suffix
+  /// if it's already present. Trailing slashes on [base] are tolerated.
+  static String deriveWebdavUrl(String base) {
+    final trimmed = _stripTrailingSlashes(base.trim());
+    if (trimmed.toLowerCase().endsWith(kWebdavPathSuffix)) {
+      return trimmed;
+    }
+    return '$trimmed$kWebdavPathSuffix';
+  }
 
   /// The URL scheme in lowercase — `http` or `https`.
   String get scheme => Uri.parse(value).scheme.toLowerCase();

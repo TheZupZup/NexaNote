@@ -107,6 +107,11 @@ The backend starts two servers:
 | WebDAV | http://127.0.0.1:8765 | Connect your NAS or Nextcloud |
 | API docs | http://127.0.0.1:8766/docs | Interactive Swagger UI |
 
+The two ports work directly out of the box. If you'd rather expose the
+backend behind a single hostname (one URL to type into the app, one
+certificate to manage, one firewall rule), see
+[Single backend URL](#single-backend-url) below.
+
 ### Flutter app
 
 ```bash
@@ -151,6 +156,104 @@ manifest (`linux/amd64` + `linux/arm64`), so x86 servers and ARM NAS units
 
 See [docs/docker.md](docs/docker.md) for the full guide, including a NAS
 (Synology / Ugreen) compose example and multi-arch buildx instructions.
+
+---
+
+## Single backend URL
+
+By default the backend exposes the REST API on `:8766` and the WebDAV server
+on `:8765` — both still work directly and unchanged. To make life easier on
+mobile (one URL to type, one TLS cert, one firewall rule), put a reverse
+proxy in front and route:
+
+| Path on the public host | Backend target | Purpose |
+|-------------------------|----------------|---------|
+| `/`                     | `127.0.0.1:8766` | REST API |
+| `/webdav`               | `127.0.0.1:8765` | WebDAV |
+
+The Flutter app then accepts a single base URL (e.g.
+`https://nexanote.example.com`) and derives the WebDAV URL by appending
+`/webdav`. Advanced users who run the legacy two-port deployment can still
+set the WebDAV URL explicitly in Settings → Backend; this overrides the
+derivation and is preserved across upgrades.
+
+### Nginx
+
+```nginx
+server {
+    listen 443 ssl http2;
+    server_name nexanote.example.com;
+
+    # TLS certificates (e.g. Let's Encrypt)
+    ssl_certificate     /etc/letsencrypt/live/nexanote.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/nexanote.example.com/privkey.pem;
+
+    # WebDAV — strip the /webdav prefix before forwarding so wsgidav
+    # serves its root at "/" as it expects.
+    location /webdav/ {
+        proxy_pass         http://127.0.0.1:8765/;
+        proxy_set_header   Host              $host;
+        proxy_set_header   X-Forwarded-For   $remote_addr;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+        proxy_redirect     off;
+        client_max_body_size 0;        # allow large uploads
+        proxy_request_buffering off;   # stream PUTs straight through
+    }
+
+    # REST API — everything else.
+    location / {
+        proxy_pass         http://127.0.0.1:8766;
+        proxy_set_header   Host              $host;
+        proxy_set_header   X-Forwarded-For   $remote_addr;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+### Caddy
+
+```
+nexanote.example.com {
+    handle_path /webdav/* {
+        reverse_proxy 127.0.0.1:8765
+    }
+    reverse_proxy 127.0.0.1:8766
+}
+```
+
+### Cloudflare Tunnel
+
+Cloudflared forwards the request path to the origin unchanged, so the
+cleanest setup is to run a local reverse proxy (Nginx or Caddy from above)
+on `127.0.0.1:80` and point the tunnel at it:
+
+```yaml
+# ~/.cloudflared/config.yml
+tunnel: <your-tunnel-id>
+credentials-file: /etc/cloudflared/<your-tunnel-id>.json
+
+ingress:
+  - hostname: nexanote.example.com
+    service: http://127.0.0.1:80
+  - service: http_status:404
+```
+
+If you'd rather skip the local proxy, use two subdomains and configure the
+WebDAV URL explicitly in the app's advanced settings:
+
+```yaml
+ingress:
+  - hostname: nexanote.example.com
+    service: http://127.0.0.1:8766
+  - hostname: webdav.nexanote.example.com
+    service: http://127.0.0.1:8765
+  - service: http_status:404
+```
+
+After configuring the proxy, point the Flutter app at
+`https://nexanote.example.com` and you're done — no second URL required
+(unless you took the two-subdomain route, in which case set the WebDAV URL
+override in Settings → Backend).
 
 ---
 

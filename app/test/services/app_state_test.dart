@@ -419,4 +419,142 @@ void main() {
       expect(coldState.apiUrl, 'http://192.0.2.10:8766');
     });
   });
+
+  // ── Unified backend URL ───────────────────────────────────────────
+  //
+  // The mobile app now accepts a single base URL — the WebDAV URL is
+  // derived by appending `/webdav` so a reverse proxy can serve both
+  // under the same domain. Advanced users can still pin the WebDAV URL
+  // explicitly to keep the legacy two-port deployment working.
+
+  group('unified backend URL', () {
+    setUp(() {
+      TestWidgetsFlutterBinding.ensureInitialized();
+      SharedPreferences.setMockInitialValues({});
+    });
+
+    test('webdavUrl is derived by appending /webdav to apiUrl by default',
+        () async {
+      await state.initLocal();
+      final s = AppState(
+        localService: service,
+        clientFactory: (_) => _StubApi(),
+      );
+      await s.connect(url: 'https://nexanote.example.com');
+
+      expect(s.apiUrl, 'https://nexanote.example.com');
+      expect(s.webdavUrl, 'https://nexanote.example.com/webdav');
+      expect(s.isWebdavUrlDerived, isTrue);
+    });
+
+    test('webdavUrl follows apiUrl when the user changes the base URL',
+        () async {
+      await state.initLocal();
+      final s = AppState(
+        localService: service,
+        clientFactory: (_) => _StubApi(),
+      );
+      await s.connect(url: 'http://127.0.0.1:8766');
+      expect(s.webdavUrl, 'http://127.0.0.1:8766/webdav');
+
+      await s.connect(url: 'https://nexanote.example.com');
+      expect(s.webdavUrl, 'https://nexanote.example.com/webdav');
+    });
+
+    test(
+        'setWebdavUrlOverride pins WebDAV URL independently — '
+        'backward compat with legacy two-port deployments', () async {
+      await state.initLocal();
+      final s = AppState(
+        localService: service,
+        clientFactory: (_) => _StubApi(),
+      );
+      await s.connect(url: 'http://192.168.1.10:8766');
+
+      // Legacy: API on 8766, WebDAV on 8765 (no reverse proxy).
+      await s.setWebdavUrlOverride('http://192.168.1.10:8765');
+
+      expect(s.apiUrl, 'http://192.168.1.10:8766');
+      expect(s.webdavUrl, 'http://192.168.1.10:8765');
+      expect(s.isWebdavUrlDerived, isFalse);
+
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getString(kPrefsWebdavUrlOverride),
+          'http://192.168.1.10:8765');
+    });
+
+    test(
+        'setWebdavUrlOverride(null) clears the override and falls back '
+        'to the derived value', () async {
+      await state.initLocal();
+      final s = AppState(
+        localService: service,
+        clientFactory: (_) => _StubApi(),
+      );
+      await s.connect(url: 'https://nexanote.example.com');
+      await s.setWebdavUrlOverride('http://192.168.1.10:8765');
+      expect(s.isWebdavUrlDerived, isFalse);
+
+      await s.setWebdavUrlOverride(null);
+
+      expect(s.isWebdavUrlDerived, isTrue);
+      expect(s.webdavUrl, 'https://nexanote.example.com/webdav');
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getString(kPrefsWebdavUrlOverride), isNull);
+    });
+
+    test('init() restores a previously-saved WebDAV override from prefs',
+        () async {
+      SharedPreferences.setMockInitialValues({
+        kPrefsApiUrl: 'http://192.168.1.10:8766',
+        kPrefsWebdavUrlOverride: 'http://192.168.1.10:8765',
+      });
+
+      final coldState = AppState(
+        localService: service,
+        clientFactory: (_) => _StubApi(),
+      );
+      await coldState.init();
+
+      expect(coldState.apiUrl, 'http://192.168.1.10:8766');
+      expect(coldState.webdavUrl, 'http://192.168.1.10:8765');
+      expect(coldState.isWebdavUrlDerived, isFalse);
+    });
+
+    test(
+        'init() with only an apiUrl in prefs (legacy single-key config) '
+        'derives webdavUrl automatically', () async {
+      SharedPreferences.setMockInitialValues({
+        kPrefsApiUrl: 'https://nexanote.example.com',
+      });
+
+      final coldState = AppState(
+        localService: service,
+        clientFactory: (_) => _StubApi(),
+      );
+      await coldState.init();
+
+      expect(coldState.apiUrl, 'https://nexanote.example.com');
+      expect(coldState.webdavUrl, 'https://nexanote.example.com/webdav');
+      expect(coldState.isWebdavUrlDerived, isTrue);
+    });
+
+    test(
+        'a blank override stored in prefs is treated as "no override" '
+        'so it does not stick as an empty WebDAV URL', () async {
+      SharedPreferences.setMockInitialValues({
+        kPrefsApiUrl: 'https://nexanote.example.com',
+        kPrefsWebdavUrlOverride: '   ',
+      });
+
+      final coldState = AppState(
+        localService: service,
+        clientFactory: (_) => _StubApi(),
+      );
+      await coldState.init();
+
+      expect(coldState.isWebdavUrlDerived, isTrue);
+      expect(coldState.webdavUrl, 'https://nexanote.example.com/webdav');
+    });
+  });
 }
