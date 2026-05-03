@@ -318,3 +318,75 @@ class TestConflictResolver:
         result = resolver.resolve(local, remote)
 
         assert result.winner.sync_status == SyncStatus.SYNCED
+
+
+# ---------------------------------------------------------------------------
+# Tests sync error reporting
+# ---------------------------------------------------------------------------
+
+class TestSyncErrorReporting:
+    """Vérifie que les échecs de push remontent un motif lisible."""
+
+    def _make_engine(self, tmp_db):
+        from nexanote.sync.client import NexaNoteSyncEngine, SyncConfig
+        config = SyncConfig(
+            server_url="http://localhost:9999/",
+            username="u",
+            password="p",
+        )
+        return NexaNoteSyncEngine(tmp_db, config)
+
+    def test_push_failure_includes_http_reason(self, tmp_db):
+        """Un PUT qui retourne 401 doit produire un message avec le motif."""
+        from nexanote.sync.client import SyncReport
+
+        nb = Notebook(name="Carnet", color="#fff")
+        tmp_db.save_notebook(nb)
+        note = Note(notebook_id=nb.id, title="Ma note", note_type=NoteType.TYPED)
+        note.add_page()
+        tmp_db.save_note(note)
+
+        engine = self._make_engine(tmp_db)
+
+        engine.client.list_notebooks = lambda: [{"name": _slugify(nb.name)}]
+        engine.client.list_notes = lambda nb_slug: []
+        engine.client.create_note_dir = lambda nb_slug, note_slug: True
+        engine.client.put_note_meta = lambda *a, **k: (False, "WebDAV upload failed: 401 Unauthorized")
+        engine.client.put_ink_page = lambda *a, **k: (True, None)
+
+        report = SyncReport()
+        engine._push_note(note, report)
+
+        assert report.errors, "an error should have been reported"
+        msg = report.errors[0]
+        assert "Échec partiel push" in msg
+        assert "Ma note" in msg
+        assert "401" in msg
+        assert "Unauthorized" in msg
+
+    def test_push_failure_does_not_leak_password(self, tmp_db):
+        """Le motif d'erreur ne doit jamais contenir le mot de passe."""
+        from nexanote.sync.client import SyncReport
+
+        nb = Notebook(name="Carnet", color="#fff")
+        tmp_db.save_notebook(nb)
+        note = Note(notebook_id=nb.id, title="Secret", note_type=NoteType.TYPED)
+        page = note.add_page()
+        page.typed_content = "TOP-SECRET-BODY-CONTENT"
+        tmp_db.save_note(note)
+
+        engine = self._make_engine(tmp_db)
+        engine.config.password = "hunter2"
+
+        engine.client.list_notebooks = lambda: [{"name": _slugify(nb.name)}]
+        engine.client.list_notes = lambda nb_slug: []
+        engine.client.create_note_dir = lambda nb_slug, note_slug: True
+        engine.client.put_note_meta = lambda *a, **k: (False, "WebDAV upload failed: 500 Server Error")
+        engine.client.put_ink_page = lambda *a, **k: (True, None)
+
+        report = SyncReport()
+        engine._push_note(note, report)
+
+        msg = report.errors[0]
+        assert "hunter2" not in msg
+        assert "TOP-SECRET-BODY-CONTENT" not in msg
