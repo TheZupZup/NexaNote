@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import '../services/app_state.dart';
 import '../services/connection_diagnostics.dart';
+import '../services/server_url.dart';
 
 class ConnectScreen extends StatefulWidget {
   const ConnectScreen({super.key});
@@ -22,11 +23,24 @@ class _ConnectScreenState extends State<ConnectScreen> {
 
   Future<void> _connect() async {
     setState(() { _connecting = true; _error = null; });
+
+    final String url;
+    try {
+      url = ServerUrl.parse(_controller.text).value;
+    } on FormatException catch (e) {
+      setState(() {
+        _error = e.message;
+        _connecting = false;
+      });
+      return;
+    }
+
     final state = context.read<AppState>();
-    await state.connect(url: _controller.text.trim());
+    await state.connect(url: url);
     if (mounted && !state.isConnected) {
       setState(() {
-        _error = 'Cannot reach the server.\nStart NexaNote backend from the project folder:\n  bash nexanote.sh\nor run:\n  python main.py';
+        _error = 'Cannot reach $url.\n'
+            'Check that the backend is running and reachable from this device.';
         _connecting = false;
       });
     }
@@ -224,8 +238,9 @@ class _ConnectScreenState extends State<ConnectScreen> {
 
   ConnectionDiagnostics _buildDiagnostics() {
     final state = context.read<AppState>();
+    final raw = _controller.text;
     return ConnectionDiagnostics.capture(
-      serverUrl: _controller.text.trim(),
+      serverUrl: ServerUrl.tryParse(raw) ?? raw.trim(),
       errorMessage: state.lastConnectError,
     );
   }
