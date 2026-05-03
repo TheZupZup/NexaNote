@@ -16,11 +16,12 @@ import importlib.util
 import logging
 import sys
 from pathlib import Path
+from typing import Optional
 
 from cheroot import wsgi
 from wsgidav.wsgidav_app import WsgiDAVApp
 
-from nexanote.models.note import Notebook
+from nexanote.models.note import Note, Notebook, NoteType, SyncStatus
 from nexanote.storage import FileNoteStore, run_migration
 from nexanote.sync.webdav_provider import NexaNoteDAVProvider
 
@@ -72,10 +73,58 @@ def ensure_default_notebook(db: FileNoteStore) -> Notebook:
         id=f"{DEFAULT_NOTEBOOK_ID_PREFIX}-0000-0000-0000-000000000000",
         name=DEFAULT_NOTEBOOK_NAME,
         color="#6b7280",
+        sync_status=SyncStatus.SYNCED,
     )
     db.save_notebook(notebook)
     logger.info("Default notebook created: %s", DEFAULT_NOTEBOOK_NAME)
     return notebook
+
+
+def seed_demo_data(db: FileNoteStore) -> Optional[Note]:
+    """
+    EN: First-run-only demo content. Creates a sample notebook and a tutorial
+        note marked as SYNCED so it lives on this server but never gets
+        re-pushed by a sync engine sharing this data dir. Pull copies it
+        to clients normally; once a client edits it, the local copy flips
+        to MODIFIED and the next push round-trips like any user note.
+
+        Skipped if any non-fallback notebook already exists. Returns the
+        seeded note (or None if nothing was seeded) — useful for tests.
+
+    FR: Contenu de démo créé une seule fois. Marqué SYNCED pour qu'il ne
+        soit jamais re-poussé par un moteur de sync partageant ce data dir.
+    """
+    has_user_notebook = any(
+        not nb.id.startswith(DEFAULT_NOTEBOOK_ID_PREFIX)
+        for nb in db.list_notebooks()
+    )
+    if has_user_notebook:
+        return None
+
+    notebook = Notebook(
+        name="Mon premier carnet",
+        color="#6366f1",
+        sync_status=SyncStatus.SYNCED,
+    )
+    db.save_notebook(notebook)
+
+    note = Note(
+        notebook_id=notebook.id,
+        title="Bienvenue dans NexaNote",
+        note_type=NoteType.TYPED,
+    )
+    page = note.add_page(template="lined")
+    page.typed_content = (
+        "# Bienvenue dans NexaNote\n\n"
+        "Cette note a été créée automatiquement.\n"
+        "Connecte ton app Flutter à ce serveur WebDAV pour commencer à synchroniser tes notes.\n"
+    )
+    # Mark SYNCED so a sync engine sharing this data dir doesn't pick the
+    # demo note up for push (it already lives on this server).
+    note.sync_status = SyncStatus.SYNCED
+    db.save_note(note)
+    logger.info("Données de démonstration créées")
+    return note
 
 
 def build_app(
@@ -160,29 +209,7 @@ def run_server(
     # present, so the very first sync push has valid parent collections.
     ensure_storage_layout(db)
     ensure_default_notebook(db)
-
-    # Créer un carnet de démonstration si seul le carnet de repli existe.
-    notebooks = [
-        nb for nb in db.list_notebooks()
-        if not nb.id.startswith(DEFAULT_NOTEBOOK_ID_PREFIX)
-    ]
-    if not notebooks:
-        from nexanote.models.note import Note, Notebook, NoteType
-        nb = Notebook(name="Mon premier carnet", color="#6366f1")
-        db.save_notebook(nb)
-        note = Note(
-            notebook_id=nb.id,
-            title="Bienvenue dans NexaNote",
-            note_type=NoteType.TYPED,
-        )
-        page = note.add_page(template="lined")
-        page.typed_content = (
-            "# Bienvenue dans NexaNote\n\n"
-            "Cette note a été créée automatiquement.\n"
-            "Connecte ton app Flutter à ce serveur WebDAV pour commencer à synchroniser tes notes.\n"
-        )
-        db.save_note(note)
-        logger.info("Données de démonstration créées")
+    seed_demo_data(db)
 
     app = build_app(db, username=username, password=password, verbose=verbose)
 

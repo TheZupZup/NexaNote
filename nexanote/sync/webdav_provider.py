@@ -489,24 +489,33 @@ class NoteMetaFile(DAVNonCollection):
         self.note = note
 
     def _serialize(self) -> bytes:
-        data = {
-            "id": self.note.id,
-            "title": self.note.title,
-            "type": self.note.note_type.value,
-            "tags": self.note.tags,
-            "is_pinned": self.note.is_pinned,
-            "created_at": self.note.created_at.isoformat(),
-            "updated_at": self.note.updated_at.isoformat(),
-            "pages": [
-                {
-                    "page_number": p.page_number,
-                    "template": p.template,
-                    "typed_content": p.typed_content,
-                }
-                for p in self.note.pages
-            ],
-        }
-        return json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
+        try:
+            data = {
+                "id": self.note.id,
+                "title": self.note.title,
+                "type": self.note.note_type.value,
+                "tags": self.note.tags,
+                "is_pinned": self.note.is_pinned,
+                "created_at": self.note.created_at.isoformat(),
+                "updated_at": self.note.updated_at.isoformat(),
+                "pages": [
+                    {
+                        "page_number": p.page_number,
+                        "template": p.template,
+                        "typed_content": p.typed_content,
+                    }
+                    for p in self.note.pages
+                ],
+            }
+            return json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
+        except Exception as exc:
+            # Surface the underlying reason instead of a bare 500. WsgiDAV
+            # calls `_serialize` from `get_content_length`/`get_content`,
+            # which run before `begin_write` on PUT — a crash here would
+            # otherwise become "WebDAV upload failed: 500 Internal Server
+            # Error" with no clue about the offending field.
+            logger.exception("note.json serialization failed for %s", self.note.id)
+            raise _safe_dav_error(exc, "could not serialize note.json") from exc
 
     def get_content_length(self) -> int:
         return len(self._serialize())
@@ -643,35 +652,45 @@ class InkFile(DAVNonCollection):
         self.note = note
 
     def _serialize(self) -> bytes:
-        data = {
-            "page_id": self.page.id,
-            "note_id": self.page.note_id,
-            "page_number": self.page.page_number,
-            "template": self.page.template,
-            "width_px": self.page.width_px,
-            "height_px": self.page.height_px,
-            "updated_at": self.page.updated_at.isoformat(),
-            "strokes": [
-                {
-                    "id": s.id,
-                    "color": s.color,
-                    "width": s.width,
-                    "tool": s.tool,
-                    "created_at": s.created_at.isoformat(),
-                    "points": [
-                        {
-                            "x": p.x,
-                            "y": p.y,
-                            "pressure": p.pressure,
-                            "ts": p.timestamp_ms,
-                        }
-                        for p in s.points
-                    ],
-                }
-                for s in self.page.strokes
-            ],
-        }
-        return json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
+        try:
+            data = {
+                "page_id": self.page.id,
+                "note_id": self.page.note_id,
+                "page_number": self.page.page_number,
+                "template": self.page.template,
+                "width_px": self.page.width_px,
+                "height_px": self.page.height_px,
+                "updated_at": self.page.updated_at.isoformat(),
+                "strokes": [
+                    {
+                        "id": s.id,
+                        "color": s.color,
+                        "width": s.width,
+                        "tool": s.tool,
+                        "created_at": s.created_at.isoformat(),
+                        "points": [
+                            {
+                                "x": p.x,
+                                "y": p.y,
+                                "pressure": p.pressure,
+                                "ts": p.timestamp_ms,
+                            }
+                            for p in s.points
+                        ],
+                    }
+                    for s in self.page.strokes
+                ],
+            }
+            return json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
+        except Exception as exc:
+            logger.exception(
+                "page_%d.ink serialization failed for note %s",
+                self.page.page_number,
+                self.note.id,
+            )
+            raise _safe_dav_error(
+                exc, f"could not serialize page_{self.page.page_number}.ink"
+            ) from exc
 
     def get_content_length(self) -> int:
         return len(self._serialize())
