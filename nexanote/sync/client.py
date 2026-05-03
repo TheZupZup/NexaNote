@@ -35,6 +35,19 @@ logger = logging.getLogger("nexanote.sync.client")
 DEFAULT_NOTEBOOK_SLUG = "uncategorized"
 
 
+def _sanitize_request_error(exc: BaseException) -> str:
+    """
+    EN: Render a requests/network exception into a short, user-safe reason.
+        Avoids leaking the full URL (which embeds the server host) and never
+        includes auth headers since those are not part of the exception.
+    FR: Convertit une exception réseau en motif court et sûr à afficher.
+    """
+    name = type(exc).__name__
+    # Use the exception class name only — the str() of requests exceptions
+    # often embeds the full URL, which we don't want to surface to the UI.
+    return f"WebDAV upload failed: {name}"
+
+
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
@@ -190,8 +203,8 @@ class WebDAVClient:
 
     def put_note_meta(
         self, notebook_slug: str, note_slug: str, data: dict
-    ) -> bool:
-        """PUT /{notebook}/{note}/note.json"""
+    ) -> tuple[bool, Optional[str]]:
+        """PUT /{notebook}/{note}/note.json — returns (ok, reason_if_failed)."""
         url = self._url(notebook_slug, note_slug, "note.json")
         try:
             resp = self.session.put(
@@ -200,15 +213,20 @@ class WebDAVClient:
                 headers={"Content-Type": "application/json"},
                 timeout=self.config.timeout_seconds,
             )
-            return resp.status_code in (200, 201, 204)
+            if resp.status_code in (200, 201, 204):
+                return True, None
+            reason = f"WebDAV upload failed: {resp.status_code} {resp.reason or ''}".strip()
+            logger.error(f"PUT note.json échoué ({url}): {reason}")
+            return False, reason
         except requests.RequestException as e:
-            logger.error(f"PUT note.json échoué ({url}): {e}")
-            return False
+            reason = _sanitize_request_error(e)
+            logger.error(f"PUT note.json échoué ({url}): {reason}")
+            return False, reason
 
     def put_ink_page(
         self, notebook_slug: str, note_slug: str, page_num: int, data: dict
-    ) -> bool:
-        """PUT /{notebook}/{note}/page_N.ink"""
+    ) -> tuple[bool, Optional[str]]:
+        """PUT /{notebook}/{note}/page_N.ink — returns (ok, reason_if_failed)."""
         url = self._url(notebook_slug, note_slug, f"page_{page_num}.ink")
         try:
             resp = self.session.put(
@@ -217,10 +235,18 @@ class WebDAVClient:
                 headers={"Content-Type": "application/json"},
                 timeout=self.config.timeout_seconds,
             )
-            return resp.status_code in (200, 201, 204)
+            if resp.status_code in (200, 201, 204):
+                return True, None
+            reason = (
+                f"WebDAV upload failed (page {page_num}): "
+                f"{resp.status_code} {resp.reason or ''}"
+            ).strip()
+            logger.error(f"PUT page.ink échoué ({url}): {reason}")
+            return False, reason
         except requests.RequestException as e:
-            logger.error(f"PUT page.ink échoué ({url}): {e}")
-            return False
+            reason = f"page {page_num}: {_sanitize_request_error(e)}"
+            logger.error(f"PUT page.ink échoué ({url}): {reason}")
+            return False, reason
 
     def create_notebook_dir(self, notebook_slug: str) -> bool:
         """MKCOL /{notebook} — creates a notebook folder on the remote server."""
@@ -630,17 +656,22 @@ class NexaNoteSyncEngine:
             self.client.create_note_dir(nb_slug, note_slug)
 
         # PUT note.json
-        meta_ok = self.client.put_note_meta(nb_slug, note_slug, _serialize_note_meta(note))
+        meta_ok, meta_reason = self.client.put_note_meta(
+            nb_slug, note_slug, _serialize_note_meta(note)
+        )
 
         # PUT page_N.ink pour chaque page
         pages_ok = True
+        page_reasons: list[str] = []
         for page in note.pages:
-            ok = self.client.put_ink_page(
+            ok, page_reason = self.client.put_ink_page(
                 nb_slug, note_slug, page.page_number,
                 _serialize_ink_page(page)
             )
             if not ok:
                 pages_ok = False
+                if page_reason:
+                    page_reasons.append(page_reason)
 
         if meta_ok and pages_ok:
             # Marquer comme SYNCED
@@ -654,6 +685,11 @@ class NexaNoteSyncEngine:
             ))
             logger.info(f"  → Envoyée : {note.title}")
         else:
-            msg = f"Échec partiel push : {note.title}"
+            reasons: list[str] = []
+            if not meta_ok and meta_reason:
+                reasons.append(meta_reason)
+            reasons.extend(page_reasons)
+            detail = "; ".join(reasons) if reasons else "unknown error"
+            msg = f"Échec partiel push : {note.title} — {detail}"
             report.errors.append(msg)
             logger.warning(msg)
