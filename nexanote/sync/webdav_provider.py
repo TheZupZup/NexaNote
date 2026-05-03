@@ -813,9 +813,23 @@ class NexaNoteDAVProvider(DAVProvider):
         """
         Résout un chemin DAV vers la ressource correspondante.
         Ex: /mon-carnet__a1b2c3d4/ma-note__e5f6g7h8/note.json
+
+        EN: For PUT requests, transparently materialise missing parent
+            collections (notebook + note) when their slug carries a valid
+            id-prefix. This makes PUT idempotent and avoids spurious 409
+            "PUT parent must be a collection" failures when a client skips
+            (or partially fails) the MKCOL chain. Read methods stay strict
+            and return None for unknown paths.
+        FR: Pour les PUT, on matérialise à la volée les collections parentes
+            manquantes (carnet/note) si leur slug porte un préfixe d'ID
+            valide. Le PUT devient idempotent et n'aboutit plus à un 409
+            « parent doit être une collection » quand le client a sauté
+            (ou raté) la chaîne MKCOL. Les méthodes de lecture restent
+            strictes.
         """
         path = path.rstrip("/") or "/"
         parts = [p for p in path.split("/") if p]
+        auto_materialize = environ.get("REQUEST_METHOD", "").upper() == "PUT"
 
         # Racine
         if not parts:
@@ -824,7 +838,10 @@ class NexaNoteDAVProvider(DAVProvider):
         # Niveau carnet
         target_nb = _find_notebook_by_slug(self.db, parts[0])
         if target_nb is None:
-            return None
+            if auto_materialize and len(parts) >= 2:
+                target_nb = _materialize_notebook(self.db, parts[0])
+            if target_nb is None:
+                return None
 
         nb_path = "/" + parts[0]
 
@@ -834,7 +851,10 @@ class NexaNoteDAVProvider(DAVProvider):
         # Niveau note
         target_note = _find_note_by_slug(self.db, target_nb.id, parts[1])
         if target_note is None:
-            return None
+            if auto_materialize and len(parts) >= 3:
+                target_note = _materialize_note(self.db, target_nb, parts[1])
+            if target_note is None:
+                return None
 
         full_note = self.db.get_note(target_note.id, load_pages=True)
         note_path = nb_path + "/" + parts[1]
@@ -846,3 +866,53 @@ class NexaNoteDAVProvider(DAVProvider):
         file_name = parts[2]
         note_col = NoteCollection(note_path, environ, self.db, full_note)
         return note_col.get_member(file_name)
+
+
+def _materialize_notebook(db: FileNoteStore, slug: str) -> Optional[Notebook]:
+    """
+    EN: Create a fresh notebook from a path slug. Returns None if the slug
+        doesn't carry a usable id-prefix — we never invent ids for arbitrary
+        names because that would mask typos as silent creations.
+    FR: Crée un carnet à partir d'un slug de chemin. None si le slug n'a
+        pas de préfixe d'ID exploitable.
+    """
+    title, id_prefix = _parse_slug(slug)
+    if id_prefix is None and slug != _DEFAULT_NB_SLUG:
+        return None
+    try:
+        notebook = Notebook(id=_id_with_prefix(id_prefix), name=title)
+        db.save_notebook(notebook)
+    except Exception:
+        logger.exception("auto-materialize notebook failed: %s", slug)
+        return None
+    logger.info("Carnet matérialisé pour PUT : %s", title)
+    return notebook
+
+
+def _materialize_note(
+    db: FileNoteStore, notebook: Notebook, slug: str
+) -> Optional[Note]:
+    """
+    EN: Create a fresh note (with one empty page) from a path slug. Returns
+        None unless the slug carries a usable id-prefix. The follow-up PUT
+        of note.json will swap the placeholder id for the client's real id.
+    FR: Crée une note (1 page vide) à partir d'un slug. None sans préfixe
+        d'ID exploitable. Le PUT note.json ensuite remplace l'ID placeholder.
+    """
+    _, id_prefix = _parse_slug(slug)
+    if id_prefix is None:
+        return None
+    title, _ = _parse_slug(slug)
+    try:
+        note = Note(
+            id=_id_with_prefix(id_prefix),
+            notebook_id=notebook.id,
+            title=title,
+        )
+        note.add_page()
+        db.save_note(note)
+    except Exception:
+        logger.exception("auto-materialize note failed: %s", slug)
+        return None
+    logger.info("Note matérialisée pour PUT : %s", title)
+    return note
