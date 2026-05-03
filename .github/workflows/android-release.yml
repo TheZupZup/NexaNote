@@ -1,0 +1,67 @@
+name: Build NexaNote Android APK
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  build-android-apk:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Install Flutter dependencies
+        run: |
+          cd app
+          flutter pub get
+
+      - name: Analyze
+        run: |
+          cd app
+          flutter analyze
+
+      - name: Run tests
+        run: |
+          cd app
+          flutter test
+
+      - name: Build NexaNote APK
+        run: |
+          cd app
+          flutter build apk --release
+
+      - name: Rename APK
+        run: |
+          mkdir -p release
+          cp app/build/app/outputs/flutter-apk/app-release.apk release/NexaNote-Android.apk
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: NexaNote-Android
+          path: release/NexaNote-Android.apk
+
+      - name: Attach APK to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/NexaNote-Android.apk
