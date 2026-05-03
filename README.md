@@ -106,12 +106,26 @@ This script starts the backend and the app automatically.
 
 Prefer to run the backend persistently on a NAS or always-on machine?
 
+From source:
+
 ```bash
 docker compose up -d --build
 ```
 
+Or pull the prebuilt image from Docker Hub (no clone needed):
+
+```bash
+docker run -d \
+  --name nexanote-backend \
+  -p 8766:8766 -p 8765:8765 \
+  -v /path/on/host/nexanote-data:/data \
+  --restart unless-stopped \
+  thezupzup/nexanote-backend:latest
+```
+
 This starts the backend on ports `8766` (API) and `8765` (WebDAV), with data
-persisted in `./data`. See [docs/docker.md](docs/docker.md) for the full guide.
+persisted in the mounted volume. See [docs/docker.md](docs/docker.md) for the
+full guide, including a NAS (Synology / Ugreen) compose example.
 
 ---
 
