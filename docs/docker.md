@@ -36,8 +36,11 @@ This will:
 
 1. Build the backend image from the `Dockerfile`.
 2. Start the `nexanote-backend` service in the background.
-3. Create a local `./data` folder that holds the SQLite database, notes, and
-   sync configuration.
+3. Create a local `./data` folder that holds your notes (`notes/<id>.md`),
+   drawings (`drawings/<id>.json`), notebooks (`notebooks/<id>.yaml`), and
+   sync configuration. From v1.0.0 onwards storage is file-based; if a
+   pre-v1 SQLite database exists in the volume it is migrated automatically
+   on first startup and renamed to `nexanote.db.legacy_backup`.
 
 ## Quick start (from Docker Hub)
 
@@ -85,7 +88,7 @@ You can also tag a specific version alongside `latest`:
 ```bash
 docker build \
   -t thezupzup/nexanote-backend:latest \
-  -t thezupzup/nexanote-backend:0.1.0 \
+  -t thezupzup/nexanote-backend:1.0.0 \
   .
 ```
 
@@ -150,7 +153,7 @@ so the manifest is built once and tagged twice:
 docker buildx build \
   --platform linux/amd64,linux/arm64 \
   -t thezupzup/nexanote-backend:latest \
-  -t thezupzup/nexanote-backend:0.1.0 \
+  -t thezupzup/nexanote-backend:1.0.0 \
   --push .
 ```
 
@@ -205,7 +208,7 @@ workflow needs two repository secrets:
 - `DOCKERHUB_USERNAME`
 - `DOCKERHUB_TOKEN` — a Docker Hub [access token](https://hub.docker.com/settings/security)
 
-It tags the image with the version (`0.1.0`), the major.minor (`0.1`), and
+It tags the image with the version (`1.0.0`), the major.minor (`1.0`), and
 `latest`.
 
 ---
@@ -354,7 +357,8 @@ docker compose up -d
   instead — Compose reads it automatically.
 - The repository's `.gitignore` should keep `.env` out of git. Double-check
   with `git status` before committing.
-- The `./data` folder contains your notes and database — do not commit it.
+- The `./data` folder contains your notes (markdown files), drawings, and
+  notebooks — do not commit it.
 
 ---
 

@@ -20,7 +20,7 @@ from pathlib import Path
 from cheroot import wsgi
 from wsgidav.wsgidav_app import WsgiDAVApp
 
-from nexanote.storage.database import NexaNoteDB
+from nexanote.storage import FileNoteStore, run_migration
 from nexanote.sync.webdav_provider import NexaNoteDAVProvider
 
 logging.basicConfig(
@@ -37,7 +37,7 @@ def _hash_password(password: str) -> str:
 
 
 def build_app(
-    db: NexaNoteDB,
+    db: FileNoteStore,
     username: str = "nexanote",
     password: str = "nexanote",
     verbose: bool = False,
@@ -106,12 +106,15 @@ def run_server(
 
     data_dir = Path(data_dir)
     data_dir.mkdir(parents=True, exist_ok=True)
-    db_path = data_dir / "nexanote.db"
 
-    logger.info(f"Base de données : {db_path}")
-    db = NexaNoteDB(db_path)
+    logger.info(f"Data directory : {data_dir}")
+    # Run any pending SQLite → file migration before opening the store.
+    migration_report = run_migration(data_dir)
+    if migration_report.ran:
+        logger.info(migration_report.summary())
+    db = FileNoteStore(data_dir)
 
-    # Créer un carnet de démonstration si la DB est vide
+    # Créer un carnet de démonstration si le store est vide
     notebooks = db.list_notebooks()
     if not notebooks:
         from nexanote.models.note import Note, Notebook, NoteType

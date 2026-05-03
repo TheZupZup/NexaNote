@@ -15,6 +15,10 @@ requests==2.33.0
 # Validation de données
 pydantic==2.12.5
 
+# YAML frontmatter pour le stockage Markdown (notes/<id>.md)
+# et carnets (notebooks/<id>.yaml)
+PyYAML==6.0.3
+
 # Tests
 pytest==9.0.3
 httpx==0.28.1          # Nécessaire pour TestClient de FastAPI

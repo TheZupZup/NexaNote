@@ -25,7 +25,7 @@ import requests
 from requests.auth import HTTPBasicAuth
 
 from nexanote.models.note import InkStroke, Note, Notebook, NoteType, Page, Point, SyncStatus
-from nexanote.storage.database import NexaNoteDB
+from nexanote.storage.file_store import FileNoteStore
 from nexanote.sync.conflict import ConflictResolver, ConflictStrategy
 
 logger = logging.getLogger("nexanote.sync.client")
@@ -460,7 +460,7 @@ class NexaNoteSyncEngine:
     Orchestre pull → diff → resolve → push.
     """
 
-    def __init__(self, db: NexaNoteDB, config: SyncConfig) -> None:
+    def __init__(self, db: FileNoteStore, config: SyncConfig) -> None:
         self.db = db
         self.config = config
         self.client = WebDAVClient(config)

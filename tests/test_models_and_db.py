@@ -1,5 +1,5 @@
 """
-Tests NexaNote — Modèles et base de données
+Tests NexaNote — Modèles et stockage fichier
 Lance avec : python -m pytest tests/ -v
 """
 
@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import pytest
 from nexanote.models.note import InkStroke, Note, Notebook, NoteType, Page, Point, SyncStatus
-from nexanote.storage.database import NexaNoteDB
+from nexanote.storage import FileNoteStore
 
 
 # ---------------------------------------------------------------------------
@@ -19,7 +19,7 @@ from nexanote.storage.database import NexaNoteDB
 
 @pytest.fixture
 def tmp_db(tmp_path):
-    db = NexaNoteDB(tmp_path / "test_nexanote.db")
+    db = FileNoteStore(tmp_path / "store")
     yield db
     db.close()
 
@@ -149,7 +149,7 @@ class TestInkStroke:
 # Tests base de données
 # ---------------------------------------------------------------------------
 
-class TestNexaNoteDB:
+class TestFileNoteStore:
     def test_save_and_get_notebook(self, tmp_db, sample_notebook):
         tmp_db.save_notebook(sample_notebook)
         retrieved = tmp_db.get_notebook(sample_notebook.id)

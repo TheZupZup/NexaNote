@@ -51,7 +51,7 @@ from pydantic import BaseModel, Field
 from nexanote.models.note import (
     InkStroke, Note, Notebook, NoteType, Page, Point, SyncStatus
 )
-from nexanote.storage.database import NexaNoteDB
+from nexanote.storage.file_store import FileNoteStore
 from nexanote.sync.client import NexaNoteSyncEngine, SyncConfig, SyncReport
 
 logger = logging.getLogger("nexanote.api")
@@ -239,7 +239,7 @@ def _page_to_schema(page: Page) -> PageSchema:
 # App FastAPI
 # ---------------------------------------------------------------------------
 
-def create_app(db: NexaNoteDB) -> FastAPI:
+def create_app(db: FileNoteStore) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -251,7 +251,7 @@ def create_app(db: NexaNoteDB) -> FastAPI:
     app = FastAPI(
         title="NexaNote API",
         description="API REST pour l'app NexaNote",
-        version="0.1.0",
+        version="1.0.0",
         lifespan=lifespan,
     )
 
@@ -270,7 +270,7 @@ def create_app(db: NexaNoteDB) -> FastAPI:
 
     _last_sync_report: dict = {}
     _sync_config: dict = {}
-    _sync_config_path = db.db_path.parent / "sync_config.json"
+    _sync_config_path = db.data_dir / "sync_config.json"
 
     def _save_sync_config_to_disk() -> None:
         """
@@ -304,7 +304,8 @@ def create_app(db: NexaNoteDB) -> FastAPI:
         stats = db.get_stats()
         return {
             "status": "ok",
-            "version": "0.1.0",
+            "version": "1.0.0",
+            "storage": "file",
             "stats": stats,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
@@ -597,13 +598,32 @@ def create_app(db: NexaNoteDB) -> FastAPI:
 
     @app.get("/storage")
     def get_storage_info():
-        import os
-        data_dir = str(db.db_path.parent)
-        db_size = os.path.getsize(db.db_path) if db.db_path.exists() else 0
+        """
+        EN: Returns storage stats. Since v1.0.0 the backend uses a file-based
+            layout (notes/<id>.md + drawings/<id>.json + notebooks/<id>.yaml)
+            instead of a SQLite database.
+        FR: Renvoie les stats de stockage. Depuis la v1.0.0 le backend
+            utilise une arborescence fichier (notes/<id>.md +
+            drawings/<id>.json + notebooks/<id>.yaml) au lieu de SQLite.
+        """
+        def _dir_size(path: Path) -> int:
+            total = 0
+            for p in path.rglob("*"):
+                if p.is_file():
+                    try:
+                        total += p.stat().st_size
+                    except OSError:
+                        pass
+            return total
+
+        total_bytes = _dir_size(db.data_dir)
         return {
-            "data_dir": data_dir,
-            "db_path": str(db.db_path),
-            "db_size_mb": round(db_size / 1024 / 1024, 2),
+            "data_dir": str(db.data_dir),
+            "storage": "file",
+            "notes_dir": str(db.notes_dir),
+            "drawings_dir": str(db.drawings_dir),
+            "notebooks_dir": str(db.notebooks_dir),
+            "total_size_mb": round(total_bytes / 1024 / 1024, 2),
         }
 
     return app
