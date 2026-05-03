@@ -168,6 +168,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ..writeln('Conflicts: ${_syncStatus['conflicts_resolved'] ?? 0}')
         ..writeln(
             'Duration: ${(_syncStatus['duration_seconds'] as num?)?.toStringAsFixed(1) ?? '0'}s');
+      final details = extractSyncErrorDetails(_syncStatus);
+      if (details.isNotEmpty) {
+        buf.writeln('Error details:');
+        for (final d in details) {
+          buf.writeln('- $d');
+        }
+      }
     }
     return buf.toString();
   }
@@ -691,5 +698,26 @@ class _SyncStat extends StatelessWidget {
       ],
     );
   }
+}
+
+/// Extracts backend-provided sync error messages from a `/sync/status`
+/// response. Accepts the canonical `errors` list or the alternative
+/// `errors_detail` / `error_messages` keys so the diagnostics stay
+/// forward-compatible if the backend renames the field. Non-string entries
+/// are stringified; blank entries are dropped.
+List<String> extractSyncErrorDetails(Map<String, dynamic> status) {
+  for (final key in const ['errors', 'errors_detail', 'error_messages']) {
+    final raw = status[key];
+    if (raw is List) {
+      final out = <String>[];
+      for (final item in raw) {
+        if (item == null) continue;
+        final s = item.toString().trim();
+        if (s.isNotEmpty) out.add(s);
+      }
+      if (out.isNotEmpty) return out;
+    }
+  }
+  return const [];
 }
 
