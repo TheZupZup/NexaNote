@@ -12,7 +12,6 @@ jobs:
 
     permissions:
       contents: read
-      packages: write
 
     steps:
       - name: Checkout
@@ -30,10 +29,12 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build and push (multi-arch)
+      - name: Build and push multi-arch image
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
-          tags: thezupzup/nexanote:latest
           platforms: linux/amd64,linux/arm64
+          tags: |
+            thezupzup/nexanote:latest
+            thezupzup/nexanote:${{ github.sha }}
