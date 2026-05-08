@@ -18,6 +18,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
+from pathlib import Path
 from typing import Optional
 from urllib.parse import urljoin, quote, unquote
 
@@ -25,14 +26,37 @@ import requests
 from requests.auth import HTTPBasicAuth
 
 from nexanote.models.note import InkStroke, Note, Notebook, NoteType, Page, Point, SyncStatus
-from nexanote.storage.file_store import FileNoteStore
+from nexanote.storage.file_store import FileNoteStore, PLAIN_MD_ID_PREFIX
 from nexanote.sync.conflict import ConflictResolver, ConflictStrategy
+from nexanote.sync.sync_state import SyncState
 
 logger = logging.getLogger("nexanote.sync.client")
 
 # EN: Fallback folder name on the remote server for notes not assigned to any notebook.
 # FR: Nom du dossier de repli sur le serveur distant pour les notes sans carnet.
 DEFAULT_NOTEBOOK_SLUG = "uncategorized"
+
+
+def _is_legacy_remote_id(note_id: Optional[str]) -> bool:
+    """
+    EN: Return True when ``note_id`` looks like it was synthesised by the
+        WebDAV provider for a plain Markdown file with no NexaNote
+        frontmatter. Such ids start with ``md.`` (the
+        ``PLAIN_MD_ID_PREFIX``) and are not stable across renames — we
+        treat them as "legacy / manual" and avoid duplicating them on
+        every pull.
+    FR: Vrai si ``note_id`` ressemble à un id synthétisé pour un .md
+        sans frontmatter NexaNote (préfixe ``md.``). On considère ces
+        notes comme "héritées / manuelles".
+    """
+    if not note_id:
+        return True
+    return note_id.startswith(PLAIN_MD_ID_PREFIX)
+
+
+def _remote_path(nb_slug: str, note_slug: str) -> str:
+    """Stable string key combining notebook + note slug for the registry."""
+    return f"{nb_slug}/{note_slug}"
 
 
 def _sanitize_request_error(exc: BaseException) -> str:
@@ -93,6 +117,13 @@ class SyncReport:
     notes_pulled: int = 0
     notes_pushed: int = 0
     conflicts_resolved: int = 0
+    # EN: Remote .md files we deliberately skipped because they have no
+    #     NexaNote frontmatter id and aren't safely mappable. Surfaces in
+    #     the diagnostic summary so users can tell whether their remote
+    #     folder still carries legacy hand-edited files.
+    # FR: .md distants délibérément ignorés (sans id NexaNote sûrement
+    #     mappable). Exposé dans le résumé pour diagnostiquer.
+    notes_ignored_legacy: int = 0
     errors: list[str] = field(default_factory=list)
     events: list[SyncEvent] = field(default_factory=list)
 
@@ -112,6 +143,11 @@ class SyncReport:
             f"Sync terminée en {self.duration_seconds():.1f}s — "
             f"{self.notes_pulled} reçues, {self.notes_pushed} envoyées, "
             f"{self.conflicts_resolved} conflits résolus"
+            + (
+                f", {self.notes_ignored_legacy} héritées ignorées"
+                if self.notes_ignored_legacy
+                else ""
+            )
             + (f", {len(self.errors)} erreurs" if self.errors else "")
         )
 
@@ -565,6 +601,12 @@ class NexaNoteSyncEngine:
         self.config = config
         self.client = WebDAVClient(config)
         self.resolver = ConflictResolver(config.conflict_strategy)
+        # EN: Per-data-dir registry of adopted/ignored remote paths. Loaded
+        #     up-front so a re-pull skips legacy files we've already decided
+        #     about; saved at the end of every ``sync()`` call.
+        # FR: Registre des chemins distants adoptés/ignorés. Chargé à l'init,
+        #     sauvegardé à la fin de chaque ``sync()``.
+        self.sync_state = SyncState.load(Path(db.data_dir))
 
     # ------------------------------------------------------------------
     # Point d'entrée principal
@@ -594,6 +636,14 @@ class NexaNoteSyncEngine:
         except Exception as e:
             logger.exception("Erreur inattendue pendant la sync")
             report.errors.append(str(e))
+        finally:
+            # Persist the registry even when sync errored — we still want
+            # to remember any "ignored" decisions made during the partial
+            # run so the next sync skips those remote paths immediately.
+            try:
+                self.sync_state.save()
+            except Exception:
+                logger.exception("could not persist sync state")
 
         report.finish()
         logger.info(report.summary())
@@ -639,16 +689,117 @@ class NexaNoteSyncEngine:
                 report.errors.append(msg)
 
     def _pull_note(self, nb_slug: str, note_slug: str, report: SyncReport) -> None:
-        """Pull une note spécifique depuis le serveur."""
+        """
+        EN: Pull a single note from the server. Resolves the local target
+            in three stages — note id, then remote-path mapping, then
+            (only for non-legacy ids) a fresh adoption. Notes whose remote
+            id looks legacy/manual (no real NexaNote frontmatter id) get
+            recorded in the ignore registry on first encounter so we never
+            re-import them. This is the core of the duplicate-creation fix.
+        FR: Récupère une note précise depuis le serveur. Résolution en
+            trois étapes (id → remote_path → adoption). Les notes dont
+            l'id ressemble à un fichier .md hérité sont enregistrées dans
+            le registre "ignoré" pour ne pas être réimportées.
+        """
+        remote_path = _remote_path(nb_slug, note_slug)
+
+        # Step 1: short-circuit on previously ignored paths. Touch the entry
+        # so its `last_seen` timestamp reflects the latest sync — useful for
+        # "still seeing this file" diagnostics.
+        if self.sync_state.is_ignored(remote_path):
+            self.sync_state.touch_ignored(remote_path)
+            report.notes_ignored_legacy += 1
+            return
+
         meta = self.client.get_note_meta(nb_slug, note_slug)
         if not meta:
             return
 
         note_id = meta.get("id")
         if not note_id:
+            # No id at all in the server payload — nothing safe to do but
+            # remember to skip it. Legacy/manual file with no NexaNote
+            # metadata; importing would invent a fresh id every time.
+            reason = "remote note.json carried no id"
+            self.sync_state.mark_ignored(remote_path, reason)
+            report.notes_ignored_legacy += 1
+            logger.info(
+                "  ⊘ Legacy/manual note ignored (%s): %s",
+                reason,
+                remote_path,
+            )
             return
 
-        # Charger les pages manuscrites
+        legacy_id = _is_legacy_remote_id(note_id)
+
+        # Step 2: try to find the local twin. First by id (frontmatter or
+        # previously-adopted synthetic id), then by the remote-path mapping
+        # we built up over previous sync sessions.
+        local_note = self.db.get_note(note_id, load_pages=True)
+        matched_via_remote_path = False
+        adopted_local_id: Optional[str] = None
+        if local_note is None:
+            adopted_local_id = self.sync_state.get_adopted_local_id(remote_path)
+            if adopted_local_id and adopted_local_id != note_id:
+                local_note = self.db.get_note(
+                    adopted_local_id, load_pages=True
+                )
+                if local_note is not None:
+                    matched_via_remote_path = True
+
+        # If a previous adoption mapped this remote_path to a local id that
+        # is no longer in the store, treat it as "user purged it" — we MUST
+        # NOT silently re-import, since that would be a duplicate. Record
+        # an ignore marker (with a clear reason) and bail out.
+        if (
+            local_note is None
+            and adopted_local_id is not None
+            and adopted_local_id != note_id
+        ):
+            reason = "previously adopted local note no longer present"
+            self.sync_state.mark_ignored(remote_path, reason)
+            report.notes_ignored_legacy += 1
+            logger.info(
+                "  ⊘ Legacy/manual note ignored (%s): %s [id=%s]",
+                reason,
+                remote_path,
+                note_id,
+            )
+            return
+
+        # Step 3: if we still have no match AND the remote id is legacy,
+        # do not adopt — record an ignore marker so future pulls bail out
+        # immediately, and surface it in the report.
+        if local_note is None and legacy_id:
+            reason = (
+                "no NexaNote frontmatter id; legacy/manual Markdown file"
+            )
+            self.sync_state.mark_ignored(remote_path, reason)
+            report.notes_ignored_legacy += 1
+            logger.info(
+                "  ⊘ Legacy/manual note ignored (%s): %s [id=%s]",
+                reason,
+                remote_path,
+                note_id,
+            )
+            return
+
+        # Remote_path match with a different id: we've already adopted this
+        # path under another local id. Refuse to merge content (the conflict
+        # resolver requires same-id notes), but refresh the mapping so the
+        # registry stays current. The local copy is canonical here.
+        if matched_via_remote_path and local_note is not None:
+            self.sync_state.mark_adopted(remote_path, local_note.id)
+            logger.info(
+                "  ↺ Remote_path match (id mismatch — keeping local %s): %s",
+                local_note.id,
+                remote_path,
+            )
+            return
+
+        # From here we know we want to adopt. Pull the ink pages now —
+        # we skipped them earlier so the legacy-ignore branch never burned
+        # extra HTTP calls on files we won't import.
         ink_pages: dict[int, dict] = {}
         for page_data in meta.get("pages", []):
             num = page_data["page_number"]
@@ -658,12 +809,11 @@ class NexaNoteSyncEngine:
 
         remote_note = _deserialize_note(meta, ink_pages)
 
-        # Chercher la version locale
-        local_note = self.db.get_note(note_id, load_pages=True)
-
         if local_note is None:
-            # Nouvelle note inconnue localement — import direct
+            # Fresh adoption. The id is non-legacy (filtered above) so it
+            # is safe to use as-is.
             self.db.save_note(remote_note)
+            self.sync_state.mark_adopted(remote_path, remote_note.id)
             report.notes_pulled += 1
             report.events.append(SyncEvent(
                 SyncEventType.NOTE_PULLED,
@@ -680,6 +830,7 @@ class NexaNoteSyncEngine:
             if result.conflict_copy:
                 self.db.save_note(result.conflict_copy)
 
+            self.sync_state.mark_adopted(remote_path, result.winner.id)
             report.notes_pulled += 1
             report.conflicts_resolved += 1
             report.events.append(SyncEvent(
@@ -695,6 +846,9 @@ class NexaNoteSyncEngine:
                 self.db.save_note(remote_note)
                 report.notes_pulled += 1
                 logger.info(f"  ↓ Mise à jour : {remote_note.title}")
+            # Always refresh the mapping so future pulls go fast even when
+            # the content hasn't changed.
+            self.sync_state.mark_adopted(remote_path, local_note.id)
 
     # ------------------------------------------------------------------
     # PUSH — envoyer les notes modifiées localement
