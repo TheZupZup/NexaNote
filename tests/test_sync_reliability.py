@@ -26,9 +26,16 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import requests
+
 from nexanote.models.note import Note, Notebook, NoteType, SyncStatus
 from nexanote.storage import FileNoteStore
-from nexanote.sync.client import NexaNoteSyncEngine, SyncConfig, SyncReport
+from nexanote.sync.client import (
+    NexaNoteSyncEngine,
+    SyncConfig,
+    SyncReport,
+    WebDAVClient,
+)
 from nexanote.sync.plan import SyncPlan
 from nexanote.sync.sync_log import (
     SYNC_LOG_FILENAME,
@@ -514,3 +521,254 @@ class TestFailedSyncKeepsStateValid:
         state_path = data_dir / SYNC_STATE_FILENAME
         if state_path.exists():
             json.loads(state_path.read_text("utf-8"))
+
+
+# ---------------------------------------------------------------------------
+# 7. Retry / backoff for transient WebDAV failures
+# ---------------------------------------------------------------------------
+
+# Minimal, empty WebDAV multistatus so a PROPFIND parses to an empty listing.
+_EMPTY_MULTISTATUS = (
+    '<?xml version="1.0" encoding="utf-8"?>'
+    '<D:multistatus xmlns:D="DAV:"></D:multistatus>'
+)
+
+
+class FakeResponse:
+    """A stand-in for ``requests.Response`` with just what the client reads."""
+
+    def __init__(self, status_code=200, reason="", json_data=None, text=""):
+        self.status_code = status_code
+        self.reason = reason
+        self._json = json_data
+        self.text = text
+
+    def json(self):
+        if self._json is None:
+            raise ValueError("no json body")
+        return self._json
+
+
+class FakeSession:
+    """
+    EN: Scriptable replacement for ``requests.Session``. ``scripts`` maps an
+        HTTP method to a list of items; each call pops the next one (the last
+        item repeats once exhausted). An item may be a ``FakeResponse`` or an
+        exception (class or instance) to raise — used to simulate timeouts.
+    FR: Remplaçant scriptable de ``requests.Session`` pour simuler réponses,
+        timeouts et erreurs réseau par méthode HTTP.
+    """
+
+    def __init__(self, scripts=None):
+        self.auth = None
+        self.verify = True
+        self.scripts = scripts or {}
+        self.calls: list[str] = []
+
+    def _next(self, method):
+        self.calls.append(method)
+        items = self.scripts.get(method)
+        if not items:
+            return FakeResponse(200)
+        item = items.pop(0) if len(items) > 1 else items[0]
+        if isinstance(item, BaseException):
+            raise item
+        if isinstance(item, type) and issubclass(item, BaseException):
+            raise item()
+        return item
+
+    def request(self, method, url, **kwargs):
+        return self._next(method.upper())
+
+    def get(self, url, **kwargs):
+        return self._next("GET")
+
+    def put(self, url, **kwargs):
+        return self._next("PUT")
+
+    def count(self, method):
+        return self.calls.count(method.upper())
+
+
+def _client(scripts):
+    """A real ``WebDAVClient`` wired to a scripted session (zero backoff)."""
+    config = SyncConfig(
+        server_url="http://stub.invalid/",
+        username="u",
+        password="hunter2-secret",
+        timeout_seconds=1,
+        backoff_seconds=(0.0, 0.0, 0.0),
+    )
+    client = WebDAVClient(config)
+    fake = FakeSession(scripts)
+    client.session = fake
+    return client, fake
+
+
+class TestTransientRetry:
+    def test_transient_503_succeeds_after_retry(self):
+        # First PUT 503, second PUT 201 → overall success after one retry.
+        client, fake = _client(
+            {"PUT": [FakeResponse(503, "Service Unavailable"), FakeResponse(201)]}
+        )
+        ok, reason = client.put_note_meta("nb__01234567", "note__abcd1234", {})
+        assert ok is True
+        assert reason is None
+        assert fake.count("PUT") == 2
+        # Diagnostics record two attempts and a non-retryable final outcome.
+        last = client.op_attempts[-1]
+        assert last.operation == "PUT"
+        assert last.attempts == 2
+        assert last.retryable is False
+        assert client.last_transient is None
+
+    def test_transient_503_on_get_is_retried(self):
+        client, fake = _client(
+            {"GET": [FakeResponse(503, "Service Unavailable"), FakeResponse(200, json_data={"id": "x"})]}
+        )
+        meta = client.get_note_meta("nb__01234567", "note__abcd1234")
+        assert meta == {"id": "x"}
+        assert fake.count("GET") == 2
+
+    def test_401_is_not_retried(self):
+        client, fake = _client({"PUT": [FakeResponse(401, "Unauthorized")]})
+        ok, reason = client.put_note_meta("nb__01234567", "note__abcd1234", {})
+        assert ok is False
+        assert "401" in reason  # status preserved
+        # Auth failure must be attempted exactly once — never retried.
+        assert fake.count("PUT") == 1
+        last = client.op_attempts[-1]
+        assert last.attempts == 1
+        assert last.retryable is False
+
+    def test_404_is_not_retried(self):
+        client, fake = _client({"PUT": [FakeResponse(404, "Not Found")]})
+        ok, _ = client.put_note_meta("nb__01234567", "note__abcd1234", {})
+        assert ok is False
+        assert fake.count("PUT") == 1
+
+    def test_timeout_is_retried_then_reported(self):
+        client, fake = _client({"PUT": [requests.ConnectTimeout]})
+        ok, reason = client.put_note_meta("nb__01234567", "note__abcd1234", {})
+        assert ok is False
+        assert reason
+        # Exhausted the full attempt budget (1 initial + 2 retries = 3).
+        assert fake.count("PUT") == client.max_attempts == 3
+        last = client.op_attempts[-1]
+        assert last.attempts == 3
+        assert last.retryable is True
+        assert client.last_transient is last
+        # The recorded reason names the transient cause and leaks no URL/host.
+        assert "ConnectTimeout" in (last.reason or "")
+        assert "stub.invalid" not in (last.reason or "")
+
+    def test_connection_error_is_retried(self):
+        client, fake = _client({"PUT": [requests.ConnectionError]})
+        ok, _ = client.put_note_meta("nb__01234567", "note__abcd1234", {})
+        assert ok is False
+        assert fake.count("PUT") == client.max_attempts
+
+
+def _engine_with_real_client(data_dir, scripts):
+    """Build an engine backed by a real WebDAVClient on a scripted session."""
+    config = SyncConfig(
+        server_url="http://stub.invalid/",
+        username="u",
+        password="hunter2-secret",
+        timeout_seconds=1,
+        backoff_seconds=(0.0, 0.0, 0.0),
+    )
+    db = FileNoteStore(data_dir)
+    engine = NexaNoteSyncEngine(db, config, dry_run=False)
+    fake = FakeSession(scripts)
+    engine.client.session = fake
+    return engine, fake
+
+
+class TestRetryableSyncReport:
+    def _push_only_scripts(self, put_item):
+        # ping ok, empty remote, MKCOL ok, PUT scripted to ``put_item``.
+        return {
+            "OPTIONS": [FakeResponse(200)],
+            "PROPFIND": [FakeResponse(207, text=_EMPTY_MULTISTATUS)],
+            "MKCOL": [FakeResponse(201)],
+            "PUT": [put_item],
+        }
+
+    def test_timeout_marks_report_retryable_without_corrupting_state(self, tmp_path):
+        data_dir = tmp_path / "client_retry"
+        engine, _ = _engine_with_real_client(
+            data_dir, self._push_only_scripts(requests.ConnectTimeout)
+        )
+        local = Note(title="Pushable", note_type=NoteType.TYPED)
+        local.add_page().typed_content = "body"
+        engine.db.save_note(local)
+
+        report = engine.sync()
+
+        # Transient push failure → not successful but explicitly retryable.
+        assert not report.success()
+        assert report.retryable is True
+        assert report.next_retry_after_seconds is not None
+        assert report.transient_reason
+        assert "stub.invalid" not in report.transient_reason
+        # Per-operation attempt records made it into the report.
+        assert any(a["operation"] == "PUT" and a["attempts"] == 3
+                   for a in report.operation_attempts)
+
+        # The local note was NOT marked synced — state stays consistent.
+        assert engine.db.get_note(local.id).sync_status == SyncStatus.LOCAL_ONLY
+        # The sync-state file (if written) is still valid JSON.
+        state_path = data_dir / SYNC_STATE_FILENAME
+        if state_path.exists():
+            json.loads(state_path.read_text("utf-8"))
+
+    def test_retryable_state_in_log_without_secrets(self, tmp_path):
+        data_dir = tmp_path / "client_retry_log"
+        engine, _ = _engine_with_real_client(
+            data_dir, self._push_only_scripts(requests.ConnectTimeout)
+        )
+        local = Note(title="Pushable", note_type=NoteType.TYPED)
+        local.add_page().typed_content = "TOP-SECRET-BODY-9999"
+        engine.db.save_note(local)
+
+        engine.sync()
+
+        payload = read_sync_log(data_dir)
+        assert payload is not None
+        assert payload["retryable"] is True
+        assert payload["next_retry_after_seconds"] is not None
+        assert payload["transient_reason"]
+        assert any(a["operation"] == "PUT" for a in payload["operation_attempts"])
+
+        raw = sync_log_path(data_dir).read_text("utf-8")
+        # No credential, no body content, no server host in the diagnostic log.
+        assert "hunter2-secret" not in raw
+        assert "TOP-SECRET-BODY-9999" not in raw
+        assert "stub.invalid" not in raw
+
+    def test_successful_retry_still_produces_normal_report(self, tmp_path):
+        data_dir = tmp_path / "client_retry_ok"
+        # PUT 503 once, then succeeds — push should complete normally.
+        engine, fake = _engine_with_real_client(
+            data_dir,
+            self._push_only_scripts(None),
+        )
+        # Replace the PUT script: transient 503 then 201, repeating the 201.
+        fake.scripts["PUT"] = [FakeResponse(503, "Service Unavailable"), FakeResponse(201)]
+
+        local = Note(title="Pushable", note_type=NoteType.TYPED)
+        local.add_page().typed_content = "body"
+        engine.db.save_note(local)
+
+        report = engine.sync()
+
+        assert report.success(), report.errors
+        # A successful sync is never flagged retryable.
+        assert report.retryable is False
+        assert report.notes_pushed == 1
+        # The note is now synced and the report reads like any normal one.
+        assert engine.db.get_note(local.id).sync_status == SyncStatus.SYNCED
+        # The retried PUT is still visible in the diagnostics (2 attempts).
+        assert any(a["operation"] == "PUT" and a["attempts"] == 2
+                   for a in report.operation_attempts)

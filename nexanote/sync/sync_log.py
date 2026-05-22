@@ -101,6 +101,26 @@ def build_sync_log(
 
     errors = [sanitize_error(e) for e in getattr(report, "errors", [])]
 
+    # Network-reliability diagnostics — attempts per operation and whether the
+    # session is worth retrying. Each entry is already URL-free (relative DAV
+    # slug path only); we still scrub the reason defensively.
+    operation_attempts = []
+    for entry in getattr(report, "operation_attempts", []) or []:
+        if not isinstance(entry, dict):
+            continue
+        reason = entry.get("reason")
+        operation_attempts.append(
+            {
+                "operation": entry.get("operation"),
+                "path": entry.get("path"),
+                "attempts": entry.get("attempts"),
+                "retryable": bool(entry.get("retryable")),
+                "reason": sanitize_error(reason) if reason else None,
+            }
+        )
+
+    transient_reason = getattr(report, "transient_reason", None)
+
     payload = {
         "version": SYNC_LOG_VERSION,
         "timestamp": timestamp.isoformat() if timestamp else None,
@@ -109,6 +129,10 @@ def build_sync_log(
         "duration_seconds": round(report.duration_seconds(), 3),
         "dry_run": bool(dry_run),
         "success": report.success(),
+        "retryable": bool(getattr(report, "retryable", False)),
+        "next_retry_after_seconds": getattr(report, "next_retry_after_seconds", None),
+        "transient_reason": sanitize_error(transient_reason) if transient_reason else None,
+        "operation_attempts": operation_attempts,
         "counts": {
             "pulled": getattr(report, "notes_pulled", 0),
             "pushed": getattr(report, "notes_pushed", 0),

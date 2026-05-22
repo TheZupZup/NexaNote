@@ -176,6 +176,12 @@ class SyncReportSchema(BaseModel):
     conflicts: list[dict] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     plan: dict = Field(default_factory=dict)
+    # Network reliability — additive too. ``retryable`` flags a transient
+    # failure (timeout/connection/429/502/503/504) so clients can back off
+    # and retry instead of surfacing it as a hard error.
+    retryable: bool = False
+    next_retry_after_seconds: Optional[float] = None
+    transient_reason: Optional[str] = None
 
 
 class ExportRequestSchema(BaseModel):
@@ -603,6 +609,9 @@ def create_app(db: FileNoteStore) -> FastAPI:
             conflicts=[c.to_dict() for c in plan.conflicts] if plan else [],
             warnings=list(plan.warnings) if plan else [],
             plan=plan.to_dict() if plan else {},
+            retryable=report.retryable,
+            next_retry_after_seconds=report.next_retry_after_seconds,
+            transient_reason=report.transient_reason,
         )
         # A dry-run is a preview — it must not clobber the last *real* status.
         if not dry_run:
