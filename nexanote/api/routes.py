@@ -170,6 +170,12 @@ class SyncReportSchema(BaseModel):
     errors: list[str]
     duration_seconds: float
     summary: str
+    # Diagnostics — additive, default-valued so existing clients are unaffected.
+    notes_ignored_legacy: int = 0
+    dry_run: bool = False
+    conflicts: list[dict] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    plan: dict = Field(default_factory=dict)
 
 
 class ExportRequestSchema(BaseModel):
@@ -558,8 +564,15 @@ def create_app(db: FileNoteStore) -> FastAPI:
         return {"status": "configured", "server_url": config.server_url}
 
     @app.post("/sync/trigger", response_model=SyncReportSchema)
-    def trigger_sync():
-        """Déclenche une synchronisation manuelle."""
+    def trigger_sync(dry_run: bool = Query(False)):
+        """
+        EN: Trigger a manual sync. With ``?dry_run=true`` the engine builds
+            the sync plan but writes no files, touches no sync state, and
+            performs no remote uploads — handy to preview what a real sync
+            would do.
+        FR: Déclenche une synchronisation manuelle. Avec ``?dry_run=true``,
+            le moteur construit le plan sans rien écrire ni envoyer.
+        """
         if not _sync_config.get("server_url"):
             raise HTTPException(400, "Sync non configurée — appeler POST /sync/configure d'abord")
 
@@ -573,9 +586,10 @@ def create_app(db: FileNoteStore) -> FastAPI:
             ),
         )
 
-        engine = NexaNoteSyncEngine(db, config)
+        engine = NexaNoteSyncEngine(db, config, dry_run=dry_run)
         report = engine.sync()
 
+        plan = report.plan
         result = SyncReportSchema(
             success=report.success(),
             notes_pulled=report.notes_pulled,
@@ -584,13 +598,37 @@ def create_app(db: FileNoteStore) -> FastAPI:
             errors=report.errors,
             duration_seconds=report.duration_seconds(),
             summary=report.summary(),
+            notes_ignored_legacy=report.notes_ignored_legacy,
+            dry_run=report.dry_run,
+            conflicts=[c.to_dict() for c in plan.conflicts] if plan else [],
+            warnings=list(plan.warnings) if plan else [],
+            plan=plan.to_dict() if plan else {},
         )
-        _last_sync_report.update(result.model_dump())
+        # A dry-run is a preview — it must not clobber the last *real* status.
+        if not dry_run:
+            _last_sync_report.clear()
+            _last_sync_report.update(result.model_dump())
         return result
 
     @app.get("/sync/status")
     def sync_status():
         return _last_sync_report or {"status": "never_synced"}
+
+    @app.get("/sync/log")
+    def sync_log():
+        """
+        EN: Return the latest sanitized sync log written to
+            ``<data_dir>/sync_logs/latest.json``. Contains note ids/titles,
+            counts, ignored remote paths, conflicts and sanitized errors —
+            never note body content or credentials.
+        FR: Renvoie le dernier journal de sync assaini.
+        """
+        from nexanote.sync.sync_log import read_sync_log
+
+        payload = read_sync_log(db.data_dir)
+        if payload is None:
+            return {"status": "no_log"}
+        return payload
 
     # ------------------------------------------------------------------
     # Export Markdown (Obsidian-friendly)
