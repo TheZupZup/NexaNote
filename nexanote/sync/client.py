@@ -77,6 +77,71 @@ def _sanitize_request_error(exc: BaseException) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Retry / transient-failure classification
+# ---------------------------------------------------------------------------
+
+# EN: HTTP statuses that signal a *transient* server/proxy condition worth
+#     retrying (rate limit + the bad-gateway/unavailable/timeout family that
+#     a NAS behind Cloudflare or a flaky mobile link routinely emits).
+# FR: Statuts HTTP transitoires qui méritent une nouvelle tentative.
+RETRYABLE_STATUS_CODES = frozenset({429, 502, 503, 504})
+
+# EN: Statuses we must NEVER retry — auth failures and a missing resource are
+#     deterministic, so retrying only wastes time and can lock an account.
+# FR: Statuts à ne jamais retenter (auth / ressource absente).
+NON_RETRYABLE_STATUS_CODES = frozenset({401, 403, 404})
+
+# EN: Small, conservative defaults. 3 attempts total with 0.5s/1s/2s waits
+#     between them keeps a flaky link usable without hammering the server.
+# FR: Réglages prudents : 3 tentatives, attentes 0.5s/1s/2s.
+DEFAULT_MAX_ATTEMPTS = 3
+DEFAULT_BACKOFF_SECONDS: tuple[float, ...] = (0.5, 1.0, 2.0)
+
+
+def _is_transient_exception(exc: BaseException) -> bool:
+    """True for network conditions that are worth retrying."""
+    return isinstance(exc, (requests.Timeout, requests.ConnectionError))
+
+
+def _transient_exception_reason(exc: BaseException) -> str:
+    """
+    EN: Short, URL-free reason for a transient network exception. We use the
+        class name only (``ConnectTimeout``, ``ReadTimeout``, ``ConnectionError``)
+        because ``str(exc)`` from requests embeds the full URL/host.
+    FR: Motif court et sans URL pour une exception réseau transitoire.
+    """
+    return type(exc).__name__
+
+
+@dataclass
+class OperationAttempt:
+    """
+    EN: One diagnostic record per WebDAV operation: how many attempts it
+        took, whether the final outcome was a *retryable* (transient)
+        failure, and a short sanitized reason. ``path`` is the relative DAV
+        slug path only — never the full URL, host, or credentials.
+    FR: Un enregistrement de diagnostic par opération WebDAV (tentatives,
+        caractère retentable, motif court). ``path`` = chemin DAV relatif
+        seulement, jamais l'URL/hôte/identifiants.
+    """
+
+    operation: str
+    path: str
+    attempts: int
+    retryable: bool
+    reason: Optional[str] = None
+
+    def to_dict(self) -> dict:
+        return {
+            "operation": self.operation,
+            "path": self.path,
+            "attempts": self.attempts,
+            "retryable": self.retryable,
+            "reason": self.reason,
+        }
+
+
+# ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
 
@@ -89,6 +154,15 @@ class SyncConfig:
     timeout_seconds: int = 15
     conflict_strategy: ConflictStrategy = ConflictStrategy.MERGE_STROKES
     verify_ssl: bool = True
+    # EN: Retry budget for transient WebDAV failures. ``max_attempts`` counts
+    #     the first try, so 3 = one initial call + two retries. The backoff
+    #     tuple gives the wait *before* each retry; it is clamped to its last
+    #     value when there are more retries than entries.
+    # FR: Budget de retries pour les échecs transitoires. ``max_attempts``
+    #     inclut le premier essai. ``backoff_seconds`` = attente avant chaque
+    #     nouvelle tentative.
+    max_attempts: int = DEFAULT_MAX_ATTEMPTS
+    backoff_seconds: tuple[float, ...] = DEFAULT_BACKOFF_SECONDS
 
 
 # ---------------------------------------------------------------------------
@@ -140,6 +214,19 @@ class SyncReport:
     # EN: True when this report describes a dry-run (no files/state written).
     # FR: Vrai quand le rapport décrit un dry-run (aucune écriture).
     dry_run: bool = False
+    # EN: Network-reliability metadata. ``retryable`` is True when the sync
+    #     failed (or partially failed) for a *transient* reason — a timeout,
+    #     connection drop, or 429/502/503/504 — so retrying later is sensible.
+    #     ``next_retry_after_seconds`` is a suggested wait before that retry,
+    #     and ``transient_reason`` is a short sanitized cause (no URL/secret).
+    #     ``operation_attempts`` lists per-operation attempt counts for the log.
+    # FR: Métadonnées de fiabilité réseau. ``retryable`` = vrai si la sync a
+    #     échoué pour une raison transitoire ; ``next_retry_after_seconds`` =
+    #     délai suggéré ; ``transient_reason`` = motif court assaini.
+    retryable: bool = False
+    next_retry_after_seconds: Optional[float] = None
+    transient_reason: Optional[str] = None
+    operation_attempts: list[dict] = field(default_factory=list)
 
     def finish(self) -> None:
         self.finished_at = datetime.now(timezone.utc)
@@ -183,11 +270,105 @@ class WebDAVClient:
         self.session = requests.Session()
         self.session.auth = self.auth
         self.session.verify = config.verify_ssl
+        self.max_attempts = max(1, int(getattr(config, "max_attempts", DEFAULT_MAX_ATTEMPTS)))
+        backoff = getattr(config, "backoff_seconds", DEFAULT_BACKOFF_SECONDS)
+        self.backoff_seconds: tuple[float, ...] = tuple(backoff) or (0.0,)
+        # EN: Diagnostics buffer — one entry per attempted operation, read by
+        #     the engine after a sync to surface attempts/retryable in the log.
+        #     ``last_transient`` is the most recent retryable failure (if any).
+        # FR: Tampon de diagnostic — une entrée par opération, lu par le moteur.
+        self.op_attempts: list[OperationAttempt] = []
+        self.last_transient: Optional[OperationAttempt] = None
 
     def _url(self, *parts: str) -> str:
         """Construit une URL à partir de parties encodées."""
         path = "/".join(quote(p, safe="") for p in parts if p)
         return urljoin(self.base_url, path)
+
+    # ------------------------------------------------------------------
+    # Retry executor — the single choke point for every network call.
+    # ------------------------------------------------------------------
+
+    def _backoff(self, attempt: int) -> None:
+        """Sleep before retry ``attempt`` (1-based), clamped to the schedule."""
+        idx = min(attempt - 1, len(self.backoff_seconds) - 1)
+        delay = self.backoff_seconds[idx]
+        if delay and delay > 0:
+            time.sleep(delay)
+
+    def _record(
+        self,
+        operation: str,
+        path: str,
+        attempts: int,
+        retryable: bool,
+        reason: Optional[str],
+    ) -> None:
+        record = OperationAttempt(
+            operation=operation,
+            path=path,
+            attempts=attempts,
+            retryable=retryable,
+            reason=reason,
+        )
+        self.op_attempts.append(record)
+        if retryable:
+            self.last_transient = record
+
+    def _execute(self, operation: str, path: str, send) -> Optional["requests.Response"]:
+        """
+        EN: Run ``send()`` (which performs one HTTP request and returns a
+            ``Response``) with bounded retry/backoff. Retries only transient
+            failures: timeouts, connection errors, and the 429/502/503/504
+            family. Auth (401/403) and 404 are returned to the caller
+            immediately — never retried. Returns the final ``Response``, or
+            ``None`` when the request could not be completed (network error
+            or exhausted transient retries). Every call appends one
+            ``OperationAttempt`` diagnostic record.
+        FR: Exécute ``send()`` avec retry/backoff borné. Ne retente que les
+            échecs transitoires (timeouts, erreurs de connexion, 429/502/
+            503/504). 401/403/404 sont rendus immédiatement, jamais retentés.
+            Retourne la ``Response`` finale ou ``None`` si la requête n'a pas
+            abouti. Chaque appel ajoute un enregistrement de diagnostic.
+        """
+        last_reason: Optional[str] = None
+        for attempt in range(1, self.max_attempts + 1):
+            try:
+                resp = send()
+            except requests.RequestException as exc:
+                if _is_transient_exception(exc):
+                    last_reason = _transient_exception_reason(exc)
+                    if attempt < self.max_attempts:
+                        self._backoff(attempt)
+                        continue
+                    self._record(operation, path, attempt, True, last_reason)
+                    return None
+                # Non-transient request error (e.g. malformed URL) — terminal.
+                self._record(
+                    operation, path, attempt, False, _sanitize_request_error(exc)
+                )
+                return None
+
+            status = resp.status_code
+            if status in RETRYABLE_STATUS_CODES and attempt < self.max_attempts:
+                last_reason = f"{status} {resp.reason or ''}".strip()
+                self._backoff(attempt)
+                continue
+
+            # Terminal response — either a success, a non-retryable status, or
+            # an exhausted transient one. A still-transient status here means
+            # we ran out of attempts, so it is reported as retryable.
+            retryable = status in RETRYABLE_STATUS_CODES
+            reason = None
+            if retryable:
+                reason = f"{status} {resp.reason or ''}".strip()
+            elif attempt > 1:
+                reason = last_reason
+            self._record(operation, path, attempt, retryable, reason)
+            return resp
+
+        # Unreachable (loop always returns), but keeps type-checkers happy.
+        return None
 
     @staticmethod
     def _is_mkcol_success(status_code: int) -> bool:
@@ -204,51 +385,64 @@ class WebDAVClient:
         return status_code in (200, 201, 405)
 
     def ping(self) -> bool:
-        """Vérifie que le serveur est accessible."""
-        try:
-            resp = self.session.request(
+        """Vérifie que le serveur est accessible (avec retry transitoire)."""
+        resp = self._execute(
+            "OPTIONS",
+            "/",
+            lambda: self.session.request(
                 "OPTIONS",
                 self.base_url,
                 timeout=self.config.timeout_seconds,
-            )
-            return resp.status_code < 400
-        except requests.RequestException:
-            return False
+            ),
+        )
+        return resp is not None and resp.status_code < 400
 
     def list_notebooks(self) -> list[dict]:
         """PROPFIND sur / — retourne la liste des carnets."""
-        return self._propfind(self.base_url, depth=1)
+        return self._propfind(self.base_url, depth=1, path_label="/")
 
     def list_notes(self, notebook_slug: str) -> list[dict]:
         """PROPFIND sur /{notebook} — retourne la liste des notes."""
-        return self._propfind(self._url(notebook_slug), depth=1)
+        return self._propfind(
+            self._url(notebook_slug), depth=1, path_label=notebook_slug
+        )
 
     def list_note_files(self, notebook_slug: str, note_slug: str) -> list[dict]:
         """PROPFIND sur /{notebook}/{note} — retourne les fichiers."""
-        return self._propfind(self._url(notebook_slug, note_slug), depth=1)
+        return self._propfind(
+            self._url(notebook_slug, note_slug),
+            depth=1,
+            path_label=f"{notebook_slug}/{note_slug}",
+        )
 
     def get_note_meta(self, notebook_slug: str, note_slug: str) -> Optional[dict]:
-        """GET /{notebook}/{note}/note.json"""
+        """GET /{notebook}/{note}/note.json (avec retry transitoire)."""
         url = self._url(notebook_slug, note_slug, "note.json")
-        try:
-            resp = self.session.get(url, timeout=self.config.timeout_seconds)
-            if resp.status_code == 200:
-                return resp.json()
+        path = f"{notebook_slug}/{note_slug}/note.json"
+        resp = self._execute(
+            "GET", path, lambda: self.session.get(url, timeout=self.config.timeout_seconds)
+        )
+        if resp is None or resp.status_code != 200:
             return None
-        except (requests.RequestException, json.JSONDecodeError) as e:
-            logger.error(f"GET note.json échoué ({url}): {e}")
+        try:
+            return resp.json()
+        except ValueError as e:
+            logger.error(f"GET note.json invalid JSON ({path}): {e}")
             return None
 
     def get_ink_page(self, notebook_slug: str, note_slug: str, page_num: int) -> Optional[dict]:
-        """GET /{notebook}/{note}/page_N.ink"""
+        """GET /{notebook}/{note}/page_N.ink (avec retry transitoire)."""
         url = self._url(notebook_slug, note_slug, f"page_{page_num}.ink")
-        try:
-            resp = self.session.get(url, timeout=self.config.timeout_seconds)
-            if resp.status_code == 200:
-                return resp.json()
+        path = f"{notebook_slug}/{note_slug}/page_{page_num}.ink"
+        resp = self._execute(
+            "GET", path, lambda: self.session.get(url, timeout=self.config.timeout_seconds)
+        )
+        if resp is None or resp.status_code != 200:
             return None
-        except (requests.RequestException, json.JSONDecodeError) as e:
-            logger.error(f"GET page.ink échoué ({url}): {e}")
+        try:
+            return resp.json()
+        except ValueError as e:
+            logger.error(f"GET page.ink invalid JSON ({path}): {e}")
             return None
 
     def put_note_meta(
@@ -303,36 +497,51 @@ class WebDAVClient:
         FR: Helper interne pour PUT avec récupération MKCOL+retry sur 409.
         """
         prefix = f"{label}: " if page_num is None else f"page {page_num}: "
+        put_path = f"{mkcol_paths[-1]}/{label}" if mkcol_paths else label
 
-        def _do_put() -> requests.Response:
-            return self.session.put(
-                url,
-                json=data,
-                headers={"Content-Type": "application/json"},
-                timeout=self.config.timeout_seconds,
+        def _do_put() -> Optional[requests.Response]:
+            # Each PUT carries its own transient retry/backoff via _execute.
+            return self._execute(
+                "PUT",
+                put_path,
+                lambda: self.session.put(
+                    url,
+                    json=data,
+                    headers={"Content-Type": "application/json"},
+                    timeout=self.config.timeout_seconds,
+                ),
             )
 
-        try:
+        resp = _do_put()
+        if resp is not None and resp.status_code in (200, 201, 204):
+            return True, None
+
+        if (
+            resp is not None
+            and resp.status_code == 409
+            and self._mkcol_chain(mkcol_paths)
+        ):
+            logger.info(
+                "PUT %s returned 409 — MKCOL'd parents, retrying once",
+                label,
+            )
             resp = _do_put()
-            if resp.status_code in (200, 201, 204):
+            if resp is not None and resp.status_code in (200, 201, 204):
                 return True, None
 
-            if resp.status_code == 409 and self._mkcol_chain(mkcol_paths):
-                logger.info(
-                    "PUT %s returned 409 — MKCOL'd parents, retrying once",
-                    label,
-                )
-                resp = _do_put()
-                if resp.status_code in (200, 201, 204):
-                    return True, None
+        if resp is None:
+            # Transient/network failure — already recorded by _execute. Build
+            # a sanitized reason from the last diagnostic record so the report
+            # carries a useful (URL-free) cause.
+            last = self.op_attempts[-1] if self.op_attempts else None
+            detail = last.reason if last and last.reason else "network error"
+            reason = f"{prefix}WebDAV upload failed: {detail}"
+            logger.error(f"PUT {label} échoué ({put_path}): {reason}")
+            return False, reason
 
-            reason = self._format_http_failure(resp, prefix)
-            logger.error(f"PUT {label} échoué ({url}): {reason}")
-            return False, reason
-        except requests.RequestException as exc:
-            reason = f"{prefix}{_sanitize_request_error(exc)}"
-            logger.error(f"PUT {label} échoué ({url}): {reason}")
-            return False, reason
+        reason = self._format_http_failure(resp, prefix)
+        logger.error(f"PUT {label} échoué ({put_path}): {reason}")
+        return False, reason
 
     @staticmethod
     def _format_http_failure(resp: requests.Response, prefix: str) -> str:
@@ -368,14 +577,15 @@ class WebDAVClient:
         """
         for path in paths:
             url = urljoin(self.base_url, "/".join(quote(p, safe="") for p in path.split("/") if p))
-            try:
-                resp = self.session.request(
-                    "MKCOL",
-                    url,
-                    timeout=self.config.timeout_seconds,
-                )
-            except requests.RequestException as exc:
-                logger.warning(f"MKCOL chain failed at {path}: {exc}")
+            resp = self._execute(
+                "MKCOL",
+                path,
+                lambda u=url: self.session.request(
+                    "MKCOL", u, timeout=self.config.timeout_seconds
+                ),
+            )
+            if resp is None:
+                logger.warning("MKCOL chain failed at %s (network/transient)", path)
                 return False
             if not self._is_mkcol_success(resp.status_code):
                 logger.warning(
@@ -390,53 +600,56 @@ class WebDAVClient:
     def create_notebook_dir(self, notebook_slug: str) -> bool:
         """MKCOL /{notebook} — creates a notebook folder on the remote server."""
         url = self._url(notebook_slug)
-        try:
-            resp = self.session.request("MKCOL", url, timeout=self.config.timeout_seconds)
-            return self._is_mkcol_success(resp.status_code)
-        except requests.RequestException as e:
-            logger.error(f"MKCOL failed ({url}): {e}")
-            return False
+        resp = self._execute(
+            "MKCOL",
+            notebook_slug,
+            lambda: self.session.request("MKCOL", url, timeout=self.config.timeout_seconds),
+        )
+        return resp is not None and self._is_mkcol_success(resp.status_code)
 
     def create_note_dir(self, notebook_slug: str, note_slug: str) -> bool:
         """MKCOL /{notebook}/{note} — creates a note folder on the remote server."""
         url = self._url(notebook_slug, note_slug)
-        try:
-            resp = self.session.request("MKCOL", url, timeout=self.config.timeout_seconds)
-            return self._is_mkcol_success(resp.status_code)
-        except requests.RequestException as e:
-            logger.error(f"MKCOL note failed ({url}): {e}")
-            return False
+        path = f"{notebook_slug}/{note_slug}"
+        resp = self._execute(
+            "MKCOL",
+            path,
+            lambda: self.session.request("MKCOL", url, timeout=self.config.timeout_seconds),
+        )
+        return resp is not None and self._is_mkcol_success(resp.status_code)
 
-    def _propfind(self, url: str, depth: int = 1) -> list[dict]:
+    def _propfind(
+        self, url: str, depth: int = 1, path_label: Optional[str] = None
+    ) -> list[dict]:
         """
-        PROPFIND WebDAV — liste les ressources à un niveau donné.
+        PROPFIND WebDAV — liste les ressources à un niveau donné (avec retry).
         Retourne une liste simplifiée de {name, href, is_collection, last_modified}.
         """
-        try:
-            resp = self.session.request(
-                "PROPFIND",
-                url,
-                headers={
-                    "Depth": str(depth),
-                    "Content-Type": "application/xml",
-                },
-                data=b"""<?xml version="1.0" encoding="utf-8"?>
+        body = b"""<?xml version="1.0" encoding="utf-8"?>
 <D:propfind xmlns:D="DAV:">
   <D:prop>
     <D:displayname/>
     <D:getlastmodified/>
     <D:resourcetype/>
   </D:prop>
-</D:propfind>""",
+</D:propfind>"""
+        resp = self._execute(
+            "PROPFIND",
+            path_label or "/",
+            lambda: self.session.request(
+                "PROPFIND",
+                url,
+                headers={
+                    "Depth": str(depth),
+                    "Content-Type": "application/xml",
+                },
+                data=body,
                 timeout=self.config.timeout_seconds,
-            )
-
-            if resp.status_code == 207:  # Multi-Status
-                return self._parse_propfind(resp.text, url)
-            return []
-        except requests.RequestException as e:
-            logger.error(f"PROPFIND échoué ({url}): {e}")
-            return []
+            ),
+        )
+        if resp is not None and resp.status_code == 207:  # Multi-Status
+            return self._parse_propfind(resp.text, url)
+        return []
 
     def _parse_propfind(self, xml_text: str, base_url: str) -> list[dict]:
         """Parse la réponse XML PROPFIND en liste de ressources."""
@@ -710,6 +923,7 @@ class NexaNoteSyncEngine:
             msg = f"Impossible de joindre le serveur : {self.config.server_url}"
             logger.error(msg)
             report.errors.append(msg)
+            self._collect_reliability_diagnostics(report)
             report.finish()
             self._write_log(report)
             return report
@@ -733,10 +947,46 @@ class NexaNoteSyncEngine:
                 except Exception:
                     logger.exception("could not persist sync state")
 
+        self._collect_reliability_diagnostics(report)
         report.finish()
         self._write_log(report)
         logger.info(report.summary())
         return report
+
+    def _collect_reliability_diagnostics(self, report: SyncReport) -> None:
+        """
+        EN: Fold the WebDAV client's per-operation attempt records into the
+            report. If the session did not fully succeed *and* at least one
+            operation failed transiently (timeout / connection drop /
+            429/502/503/504), mark the report ``retryable`` and suggest a
+            wait before the next attempt. Never raises and never mutates
+            sync state — purely diagnostic.
+        FR: Replie les enregistrements d'opérations du client dans le rapport.
+            Si la session n'a pas réussi et qu'au moins une opération a échoué
+            de façon transitoire, marque le rapport ``retryable`` avec un délai
+            suggéré. Ne lève jamais, ne touche pas l'état de sync.
+        """
+        client = self.client
+        attempts = list(getattr(client, "op_attempts", []) or [])
+        if attempts:
+            report.operation_attempts = [
+                a.to_dict() if hasattr(a, "to_dict") else dict(a) for a in attempts
+            ]
+
+        transient = [a for a in attempts if getattr(a, "retryable", False)]
+        if transient and not report.success():
+            report.retryable = True
+            report.transient_reason = getattr(transient[-1], "reason", None)
+            report.next_retry_after_seconds = self._suggested_retry_delay()
+
+    def _suggested_retry_delay(self) -> float:
+        """Largest configured backoff — a sensible wait before a whole-sync retry."""
+        backoff = getattr(self.config, "backoff_seconds", DEFAULT_BACKOFF_SECONDS)
+        try:
+            values = [float(b) for b in backoff if b is not None]
+        except (TypeError, ValueError):
+            values = []
+        return max(values) if values else max(DEFAULT_BACKOFF_SECONDS)
 
     def _write_log(self, report: SyncReport) -> None:
         """

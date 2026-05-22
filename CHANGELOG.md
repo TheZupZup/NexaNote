@@ -28,6 +28,21 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   note body content, passwords, tokens, or server URLs — error strings are
   scrubbed and the plan/report only ever hold metadata.
 
+- **Retry & backoff for transient failures.** Every WebDAV network
+  operation (GET, PROPFIND, PUT, MKCOL) is now retried on transient
+  conditions — timeouts, connection drops, and HTTP 429/502/503/504 —
+  with small conservative defaults (3 attempts, 0.5s/1s/2s backoff).
+  Auth failures (401/403) and 404 are never retried. Both the attempt
+  budget and per-call timeout are configurable on `SyncConfig`
+  (`max_attempts`, `backoff_seconds`, `timeout_seconds`).
+
+- **Retryable sync reports.** When a sync fails for a transient reason the
+  report (and `POST /sync/trigger`) carries `retryable: true`, a short
+  `transient_reason`, and a suggested `next_retry_after_seconds`. The
+  diagnostic log additionally records per-operation attempt counts so a
+  flaky NAS/Cloudflare/mobile link is easy to spot — still with no body
+  content, credentials, or server URLs.
+
 ### Improved
 
 - **Conflict safety.** When a note changed both locally and remotely, the
