@@ -12,9 +12,11 @@ FR: Tourne sur l'appareil. Compare les notes locales avec un serveur WebDAV
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -28,6 +30,8 @@ from requests.auth import HTTPBasicAuth
 from nexanote.models.note import InkStroke, Note, Notebook, NoteType, Page, Point, SyncStatus
 from nexanote.storage.file_store import FileNoteStore, PLAIN_MD_ID_PREFIX
 from nexanote.sync.conflict import ConflictResolver, ConflictStrategy
+from nexanote.sync.plan import SyncPlan
+from nexanote.sync.sync_log import write_sync_log
 from nexanote.sync.sync_state import SyncState
 
 logger = logging.getLogger("nexanote.sync.client")
@@ -126,6 +130,16 @@ class SyncReport:
     notes_ignored_legacy: int = 0
     errors: list[str] = field(default_factory=list)
     events: list[SyncEvent] = field(default_factory=list)
+    # EN: The plan backing this session — what was (or would be) pushed,
+    #     pulled, ignored, or flagged as a conflict. Populated by the engine
+    #     and read by the diagnostic sync log. May be None when a report is
+    #     built standalone (e.g. a direct ``_push`` call in tests).
+    # FR: Le plan de cette session (poussé/tiré/ignoré/conflits). Rempli par
+    #     le moteur, lu par le journal de diagnostic. Peut être None.
+    plan: Optional[SyncPlan] = None
+    # EN: True when this report describes a dry-run (no files/state written).
+    # FR: Vrai quand le rapport décrit un dry-run (aucune écriture).
+    dry_run: bool = False
 
     def finish(self) -> None:
         self.finished_at = datetime.now(timezone.utc)
@@ -590,13 +604,37 @@ def _serialize_ink_page(page: Page) -> dict:
     }
 
 
+def _make_local_conflict_copy(local: Note) -> Note:
+    """
+    EN: Build an independent "(conflit …)" copy of the local note so its
+        unsynced edits survive when the chosen resolution would otherwise
+        replace them with the remote version. Mirrors the copy the
+        ``KEEP_BOTH`` strategy makes, but is created at the engine level so
+        the safety net applies under *every* conflict strategy.
+    FR: Crée une copie indépendante "(conflit …)" de la note locale pour
+        préserver ses modifications non synchronisées quand la résolution
+        choisie les remplacerait par la version distante.
+    """
+    conflict_copy = copy.deepcopy(local)
+    conflict_copy.id = str(uuid.uuid4())
+    ts = local.updated_at.strftime("%Y-%m-%d_%H-%M")
+    conflict_copy.title = f"{local.title} (conflit {ts})"
+    conflict_copy.sync_status = SyncStatus.LOCAL_ONLY
+    return conflict_copy
+
+
 class NexaNoteSyncEngine:
     """
     Moteur de synchronisation principal.
     Orchestre pull → diff → resolve → push.
     """
 
-    def __init__(self, db: FileNoteStore, config: SyncConfig) -> None:
+    def __init__(
+        self,
+        db: FileNoteStore,
+        config: SyncConfig,
+        dry_run: bool = False,
+    ) -> None:
         self.db = db
         self.config = config
         self.client = WebDAVClient(config)
@@ -607,6 +645,42 @@ class NexaNoteSyncEngine:
         # FR: Registre des chemins distants adoptés/ignorés. Chargé à l'init,
         #     sauvegardé à la fin de chaque ``sync()``.
         self.sync_state = SyncState.load(Path(db.data_dir))
+        # EN: Dry-run builds the plan but performs no writes (no note files,
+        #     no sync-state file, no remote PUTs, no sync log). The plan is
+        #     populated as decisions are made; in dry-run that happens with
+        #     every mutating call short-circuited.
+        # FR: Le dry-run construit le plan sans aucune écriture.
+        self.dry_run = dry_run
+        # The active plan for the current session — created in ``sync()`` and
+        # lazily in ``_pull``/``_push`` for standalone calls (e.g. tests).
+        self.plan: Optional[SyncPlan] = None
+
+    # ------------------------------------------------------------------
+    # Dry-run guards — the single choke point for every state mutation.
+    # In dry-run mode each of these is a no-op, which is what makes the
+    # "dry-run never writes" guarantee easy to audit and to test.
+    # ------------------------------------------------------------------
+
+    def _ensure_plan(self) -> SyncPlan:
+        if self.plan is None:
+            self.plan = SyncPlan()
+        return self.plan
+
+    def _apply_save_note(self, note: Note, save_pages: bool = True) -> None:
+        if not self.dry_run:
+            self.db.save_note(note, save_pages=save_pages)
+
+    def _apply_mark_adopted(self, remote_path: str, local_id: str) -> None:
+        if not self.dry_run:
+            self.sync_state.mark_adopted(remote_path, local_id)
+
+    def _apply_mark_ignored(self, remote_path: str, reason: str) -> None:
+        if not self.dry_run:
+            self.sync_state.mark_ignored(remote_path, reason)
+
+    def _apply_touch_ignored(self, remote_path: str) -> None:
+        if not self.dry_run:
+            self.sync_state.touch_ignored(remote_path)
 
     # ------------------------------------------------------------------
     # Point d'entrée principal
@@ -614,11 +688,22 @@ class NexaNoteSyncEngine:
 
     def sync(self) -> SyncReport:
         """
-        Lance une session de synchronisation complète.
-        Retourne un rapport détaillé.
+        EN: Run a full sync session: ping → pull → push. The ``SyncPlan`` is
+            built as decisions are made; in dry-run no files, sync state, or
+            remote resources are touched and no log is written. Otherwise the
+            sync state is persisted (even on error, so partial "ignored"
+            decisions survive) and a sanitized log is written at the end.
+        FR: Lance une session complète : ping → pull → push. Le plan est
+            construit au fil des décisions ; en dry-run rien n'est écrit.
         """
         report = SyncReport()
-        logger.info("Début de la synchronisation NexaNote")
+        report.dry_run = self.dry_run
+        self.plan = SyncPlan()
+        report.plan = self.plan
+        logger.info(
+            "Début de la synchronisation NexaNote%s",
+            " (dry-run)" if self.dry_run else "",
+        )
 
         # Vérifier la connexion
         if not self.client.ping():
@@ -626,6 +711,7 @@ class NexaNoteSyncEngine:
             logger.error(msg)
             report.errors.append(msg)
             report.finish()
+            self._write_log(report)
             return report
 
         try:
@@ -640,14 +726,32 @@ class NexaNoteSyncEngine:
             # Persist the registry even when sync errored — we still want
             # to remember any "ignored" decisions made during the partial
             # run so the next sync skips those remote paths immediately.
-            try:
-                self.sync_state.save()
-            except Exception:
-                logger.exception("could not persist sync state")
+            # Skipped entirely in dry-run so state on disk is never touched.
+            if not self.dry_run:
+                try:
+                    self.sync_state.save()
+                except Exception:
+                    logger.exception("could not persist sync state")
 
         report.finish()
+        self._write_log(report)
         logger.info(report.summary())
         return report
+
+    def _write_log(self, report: SyncReport) -> None:
+        """
+        EN: Write the sanitized diagnostic log, unless this was a dry-run
+            (which must not write any files). Never raises.
+        FR: Écrit le journal de diagnostic assaini, sauf en dry-run.
+        """
+        if self.dry_run:
+            return
+        try:
+            write_sync_log(
+                self.db.data_dir, report, self.plan, dry_run=self.dry_run
+            )
+        except Exception:
+            logger.exception("could not write sync log")
 
     # ------------------------------------------------------------------
     # PULL — récupérer les changements du serveur
@@ -661,6 +765,7 @@ class NexaNoteSyncEngine:
           - Si connue et identique → skip
           - Si connue et différente → résoudre le conflit
         """
+        self._ensure_plan()
         report.events.append(SyncEvent(SyncEventType.PULL_START, "Pull depuis le serveur"))
         logger.info("PULL — récupération des notes distantes")
 
@@ -701,14 +806,20 @@ class NexaNoteSyncEngine:
             l'id ressemble à un fichier .md hérité sont enregistrées dans
             le registre "ignoré" pour ne pas être réimportées.
         """
+        plan = self._ensure_plan()
         remote_path = _remote_path(nb_slug, note_slug)
 
         # Step 1: short-circuit on previously ignored paths. Touch the entry
         # so its `last_seen` timestamp reflects the latest sync — useful for
         # "still seeing this file" diagnostics.
         if self.sync_state.is_ignored(remote_path):
-            self.sync_state.touch_ignored(remote_path)
+            self._apply_touch_ignored(remote_path)
             report.notes_ignored_legacy += 1
+            plan.add_ignore(
+                remote_path,
+                self.sync_state.get_ignored_reason(remote_path)
+                or "previously ignored",
+            )
             return
 
         meta = self.client.get_note_meta(nb_slug, note_slug)
@@ -721,8 +832,9 @@ class NexaNoteSyncEngine:
             # remember to skip it. Legacy/manual file with no NexaNote
             # metadata; importing would invent a fresh id every time.
             reason = "remote note.json carried no id"
-            self.sync_state.mark_ignored(remote_path, reason)
+            self._apply_mark_ignored(remote_path, reason)
             report.notes_ignored_legacy += 1
+            plan.add_ignore(remote_path, reason)
             logger.info(
                 "  ⊘ Legacy/manual note ignored (%s): %s",
                 reason,
@@ -757,8 +869,9 @@ class NexaNoteSyncEngine:
             and adopted_local_id != note_id
         ):
             reason = "previously adopted local note no longer present"
-            self.sync_state.mark_ignored(remote_path, reason)
+            self._apply_mark_ignored(remote_path, reason)
             report.notes_ignored_legacy += 1
+            plan.add_ignore(remote_path, reason)
             logger.info(
                 "  ⊘ Legacy/manual note ignored (%s): %s [id=%s]",
                 reason,
@@ -774,8 +887,9 @@ class NexaNoteSyncEngine:
             reason = (
                 "no NexaNote frontmatter id; legacy/manual Markdown file"
             )
-            self.sync_state.mark_ignored(remote_path, reason)
+            self._apply_mark_ignored(remote_path, reason)
             report.notes_ignored_legacy += 1
+            plan.add_ignore(remote_path, reason)
             logger.info(
                 "  ⊘ Legacy/manual note ignored (%s): %s [id=%s]",
                 reason,
@@ -789,7 +903,11 @@ class NexaNoteSyncEngine:
         # resolver requires same-id notes), but refresh the mapping so the
         # registry stays current. The local copy is canonical here.
         if matched_via_remote_path and local_note is not None:
-            self.sync_state.mark_adopted(remote_path, local_note.id)
+            self._apply_mark_adopted(remote_path, local_note.id)
+            plan.add_warning(
+                f"remote path changed id on server; kept local note "
+                f"{local_note.id[:8]} for {remote_path}"
+            )
             logger.info(
                 "  ↺ Remote_path match (id mismatch — keeping local %s): %s",
                 local_note.id,
@@ -812,9 +930,10 @@ class NexaNoteSyncEngine:
         if local_note is None:
             # Fresh adoption. The id is non-legacy (filtered above) so it
             # is safe to use as-is.
-            self.db.save_note(remote_note)
-            self.sync_state.mark_adopted(remote_path, remote_note.id)
+            self._apply_save_note(remote_note)
+            self._apply_mark_adopted(remote_path, remote_note.id)
             report.notes_pulled += 1
+            plan.add_pull(remote_note.id, remote_note.title)
             report.events.append(SyncEvent(
                 SyncEventType.NOTE_PULLED,
                 f"Nouvelle note importée : {remote_note.title}",
@@ -823,32 +942,58 @@ class NexaNoteSyncEngine:
             logger.info(f"  ← Importée : {remote_note.title}")
 
         elif local_note.sync_status == SyncStatus.MODIFIED:
-            # Conflit potentiel — résoudre
+            # Conflict path — local has unsynced edits and a remote copy
+            # exists. Snapshot the local version *before* resolving so its
+            # edits can be preserved even when the chosen strategy would
+            # overwrite them.
+            local_snapshot = copy.deepcopy(local_note)
             result = self.resolver.resolve(local_note, remote_note)
-            self.db.save_note(result.winner)
 
-            if result.conflict_copy:
-                self.db.save_note(result.conflict_copy)
+            # A genuine conflict = both sides changed. The resolver reports
+            # no conflict when the timestamps match (identical versions).
+            is_real_conflict = result.had_conflict() or (
+                local_snapshot.updated_at != remote_note.updated_at
+            )
+            local_won = local_snapshot.updated_at >= remote_note.updated_at
 
-            self.sync_state.mark_adopted(remote_path, result.winner.id)
+            # Conflict safety net: never silently drop local edits. If the
+            # remote version won and the strategy kept no copy of the local
+            # one, synthesise one so both versions survive on disk.
+            conflict_copy = result.conflict_copy
+            if is_real_conflict and conflict_copy is None and not local_won:
+                conflict_copy = _make_local_conflict_copy(local_snapshot)
+
+            self._apply_save_note(result.winner)
+            if conflict_copy is not None:
+                self._apply_save_note(conflict_copy)
+
+            self._apply_mark_adopted(remote_path, result.winner.id)
             report.notes_pulled += 1
             report.conflicts_resolved += 1
+            if is_real_conflict:
+                plan.add_conflict(
+                    note_id,
+                    local_snapshot.title,
+                    result.message,
+                    preserved_both=conflict_copy is not None,
+                )
             report.events.append(SyncEvent(
                 SyncEventType.CONFLICT_RESOLVED,
                 result.message,
                 note_id=note_id,
             ))
-            logger.info(f"  ⚡ Conflit résolu : {local_note.title} — {result.message}")
+            logger.info(f"  ⚡ Conflit résolu : {local_snapshot.title} — {result.message}")
 
         else:
             # Pas de modification locale — appliquer la version distante si plus récente
             if remote_note.updated_at > local_note.updated_at:
-                self.db.save_note(remote_note)
+                self._apply_save_note(remote_note)
                 report.notes_pulled += 1
+                plan.add_pull(remote_note.id, remote_note.title)
                 logger.info(f"  ↓ Mise à jour : {remote_note.title}")
             # Always refresh the mapping so future pulls go fast even when
             # the content hasn't changed.
-            self.sync_state.mark_adopted(remote_path, local_note.id)
+            self._apply_mark_adopted(remote_path, local_note.id)
 
     # ------------------------------------------------------------------
     # PUSH — envoyer les notes modifiées localement
@@ -859,6 +1004,7 @@ class NexaNoteSyncEngine:
         Envoie toutes les notes marquées MODIFIED ou LOCAL_ONLY
         vers le serveur WebDAV.
         """
+        plan = self._ensure_plan()
         report.events.append(SyncEvent(SyncEventType.PUSH_START, "Push vers le serveur"))
         logger.info("PUSH — envoi des notes locales modifiées")
 
@@ -871,6 +1017,12 @@ class NexaNoteSyncEngine:
         logger.debug(f"  {len(to_push)} notes à pousser")
 
         for note in to_push:
+            # Dry-run records the intent to push but performs no network PUT
+            # — it must never modify the remote server either.
+            if self.dry_run:
+                plan.add_push(note.id, note.title)
+                report.notes_pushed += 1
+                continue
             try:
                 full_note = self.db.get_note(note.id, load_pages=True)
                 if full_note:
@@ -958,8 +1110,9 @@ class NexaNoteSyncEngine:
         if meta_ok and pages_ok:
             # Marquer comme SYNCED
             note.sync_status = SyncStatus.SYNCED
-            self.db.save_note(note, save_pages=False)
+            self._apply_save_note(note, save_pages=False)
             report.notes_pushed += 1
+            self._ensure_plan().add_push(note.id, note.title)
             report.events.append(SyncEvent(
                 SyncEventType.NOTE_PUSHED,
                 f"Note envoyée : {note.title}",

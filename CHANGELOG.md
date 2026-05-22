@@ -6,6 +6,41 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## Unreleased — Sync reliability & diagnostics
+
+### New
+
+- **Sync planning.** Each sync session now builds a `SyncPlan` recording
+  what it will push, pull, ignore, and which notes are in conflict, plus
+  any warnings. The plan is the single source the dry-run mode and the
+  diagnostic log read from.
+
+- **Dry-run mode.** `NexaNoteSyncEngine(db, config, dry_run=True)` — or
+  `POST /sync/trigger?dry_run=true` — builds the plan without writing any
+  note files, touching the sync-state registry, uploading to the remote,
+  or writing a log. Use it to preview what a real sync would do.
+
+- **Sanitized sync log.** Every real sync writes
+  `<data_dir>/sync_logs/latest.json` (so `/data/sync_logs/latest.json` in
+  the Docker image), readable via `GET /sync/log`. It records the
+  timestamp, duration, counts, pushed/pulled note ids and titles, ignored
+  legacy remote paths, conflicts, and sanitized errors. It never contains
+  note body content, passwords, tokens, or server URLs — error strings are
+  scrubbed and the plan/report only ever hold metadata.
+
+### Improved
+
+- **Conflict safety.** When a note changed both locally and remotely, the
+  conflict is detected and surfaced in the plan/log instead of being
+  resolved silently. If the chosen strategy would otherwise drop the local
+  edits, a `(conflit …)` copy is kept so both versions survive on disk.
+
+- **Idempotent sync state.** A failed sync still persists the sync-state
+  registry atomically, so a crash mid-session can never leave a corrupt or
+  half-written `.nexanote_sync_state.json`.
+
+---
+
 ## v1.0.0 — File-based storage
 
 ### New
