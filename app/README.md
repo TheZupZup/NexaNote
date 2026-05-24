@@ -1,17 +1,25 @@
-# app
+# NexaNote (Flutter app)
 
-A new Flutter project.
+The Flutter client for NexaNote, an open-source, privacy-friendly note-taking app.
 
-## Getting Started
+## Branding
 
-This project is a starting point for a Flutter application.
+Installed builds are branded as **NexaNote**:
 
-A few resources to get you started if this is your first Flutter project:
+- App package: `com.nexanote.app`
+- Android launcher label: `NexaNote` (`android:label` in `android/app/src/main/AndroidManifest.xml`)
+- Launcher icon: `android/app/src/main/res/mipmap-*/ic_launcher.png`, plus an
+  adaptive icon (`mipmap-anydpi-v26/ic_launcher.xml` with
+  `ic_launcher_foreground.png` and the `ic_launcher_background` color).
+- Linux window title: `NexaNote` (`linux/runner/my_application.cc`)
 
-- [Learn Flutter](https://docs.flutter.dev/get-started/learn-flutter)
-- [Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Flutter learning resources](https://docs.flutter.dev/reference/learning-resources)
+The APK installs and appears in the app drawer as **NexaNote**.
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+## Build the Android APK
+
+```sh
+flutter pub get
+flutter build apk --release
+```
+
+The release APK is written to `build/app/outputs/flutter-apk/app-release.apk`.
