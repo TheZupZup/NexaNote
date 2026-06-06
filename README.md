@@ -134,6 +134,11 @@ There is no Play Store listing yet. To install on Android:
 
 The Android build is functional but still being polished, so expect rough edges.
 
+> **F-Droid readiness in progress.** A draft F-Droid metadata file lives at
+> [`metadata/com.nexanote.app.yml`](metadata/com.nexanote.app.yml). NexaNote
+> has not been submitted to fdroiddata yet — GitHub Releases remains the
+> official source for the Android APK for the time being.
+
 ---
 
 ## Local development
