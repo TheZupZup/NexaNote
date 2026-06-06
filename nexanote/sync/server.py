@@ -229,7 +229,14 @@ def run_server(
     logger.info("=" * 55)
     logger.info("  Pour se connecter depuis un client WebDAV :")
     logger.info(f"  URL : http://{host}:{port}/")
-    logger.info(f"  Identifiants : {username} / {password}")
+    # EN: The password is intentionally NOT logged. Container logs are often
+    #     persisted, forwarded, or shared in bug reports — printing the
+    #     credential in plaintext would leak it. Users configure the
+    #     password via --password / NEXANOTE_PASSWORD; the server prints
+    #     only the username so operators can confirm which account is live.
+    # FR: Le mot de passe n'est jamais journalisé — les logs étant souvent
+    #     persistés/transmis, l'afficher ferait fuiter le secret.
+    logger.info(f"  Utilisateur : {username} (mot de passe configuré)")
     logger.info("=" * 55)
     logger.info("  Ctrl+C pour arrêter le serveur")
 
