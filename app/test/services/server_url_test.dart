@@ -150,6 +150,38 @@ void main() {
       );
       expect(ServerUrl.parse('http://example.com').isLocalNetwork, isFalse);
     });
+
+    test(
+        'is false for public domain names whose first letters happen to '
+        'match an IPv6 unique-local / link-local prefix', () {
+      // Regression: `isLocalHost` used to short-circuit on hosts starting
+      // with `fc` / `fd` / `fe8..feb` without checking for `:`, which
+      // misclassified ordinary DNS hostnames (e.g. `fcommerce.example.com`,
+      // `feb-corp.net`) as local IPv6 literals. That suppressed the HTTPS
+      // warning for legitimately public domains.
+      expect(
+        ServerUrl.parse('https://fcommerce.example.com').isLocalNetwork,
+        isFalse,
+      );
+      expect(
+        ServerUrl.parse('https://fd-app.example.org').isLocalNetwork,
+        isFalse,
+      );
+      expect(
+        ServerUrl.parse('https://feb-corp.net').isLocalNetwork,
+        isFalse,
+      );
+      expect(
+        ServerUrl.parse('https://fea-store.io').isLocalNetwork,
+        isFalse,
+      );
+      // The same hosts should also be treated as "insecure when on http"
+      // so the user gets the HTTPS nudge for a public host.
+      expect(
+        ServerUrl.parse('http://fcommerce.example.com').isInsecureRemote,
+        isTrue,
+      );
+    });
   });
 
   group('ServerUrl.deriveWebdavUrl', () {

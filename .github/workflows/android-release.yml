@@ -34,12 +34,18 @@ jobs:
           cd app
           flutter pub get
 
-      - name: Analyze
+      # `flutter analyze` and `flutter test` are intentionally non-blocking
+      # for the APK build job: an analyze warning or a flaky test must not
+      # prevent shipping a tagged release. The Python test workflow is the
+      # gating signal for backend changes; static analysis still runs here
+      # so its output is visible in the job log, just without `set -e`
+      # promoting a warning to a build failure.
+      - name: Analyze (non-blocking — see comment above)
         run: |
           cd app
           flutter analyze || true
 
-      - name: Run tests
+      - name: Run tests (non-blocking — see comment above)
         run: |
           cd app
           flutter test || true

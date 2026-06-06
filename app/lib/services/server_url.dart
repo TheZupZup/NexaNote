@@ -127,12 +127,19 @@ class ServerUrl {
     if (h == 'localhost' || h.endsWith('.local')) return true;
     if (h == '::1') return true;
     // IPv6 unique-local fc00::/7 (fc.. / fd..) and link-local fe80::/10.
-    if (h.startsWith('fc') || h.startsWith('fd')) return true;
-    if (h.startsWith('fe8') ||
-        h.startsWith('fe9') ||
-        h.startsWith('fea') ||
-        h.startsWith('feb')) {
-      return true;
+    // Gate on the presence of an IPv6 separator so a regular DNS hostname
+    // like `fcommerce.example.com` or `feb-foo.net` isn't mistaken for a
+    // local IPv6 literal — that misclassification used to suppress the
+    // HTTPS warning for legitimately public domains starting with those
+    // letters.
+    if (h.contains(':')) {
+      if (h.startsWith('fc') || h.startsWith('fd')) return true;
+      if (h.startsWith('fe8') ||
+          h.startsWith('fe9') ||
+          h.startsWith('fea') ||
+          h.startsWith('feb')) {
+        return true;
+      }
     }
     final parts = h.split('.');
     if (parts.length != 4) return false;

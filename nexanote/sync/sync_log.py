@@ -54,9 +54,19 @@ _URL_RE = re.compile(r"https?://[^\s\"'<>]+", re.IGNORECASE)
 # EN: Defensive scrub for any ``secret = value`` / ``token: value`` pair that
 #     might slip into an error message. The engine already avoids leaking
 #     these, but a sync log is a durable artifact — belt and braces.
+#     The value side intentionally consumes any auth scheme prefix (Basic /
+#     Bearer / Token …) followed by the credential itself, so a header
+#     like ``Authorization: Basic dXNlcjpwYXNz`` is fully redacted instead
+#     of leaving the base64 credential trailing the scheme name.
 # FR: Filet de sécurité pour toute paire ``secret=valeur`` dans un message.
+#     La partie valeur absorbe aussi un éventuel schéma d'authentification
+#     (Basic/Bearer/Token…) et la valeur qui suit, pour qu'un en-tête
+#     ``Authorization: Basic <token>`` soit entièrement masqué.
 _KV_SECRET_RE = re.compile(
-    r"(?i)\b(password|passwd|pwd|token|secret|api[-_]?key|authorization|auth|credentials?)\s*[=:]\s*\S+"
+    r"(?i)\b(password|passwd|pwd|token|secret|api[-_]?key|authorization|auth|credentials?)"
+    r"\s*[=:]\s*"
+    r"(?:(?:Basic|Bearer|Token|Digest)\s+)?"
+    r"\S+"
 )
 
 
