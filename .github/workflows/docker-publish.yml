@@ -29,22 +29,42 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # EN: Publish under both the short (`nexanote`) and explicit
-      #     (`nexanote-backend`) names. Existing docs and the bundled
-      #     docker-compose.yml reference the `-backend` variant while
-      #     README points at the short one — keeping both tags in sync
-      #     avoids broken pull commands for users following either guide.
-      # FR: Publie sous les deux noms (`nexanote` et `nexanote-backend`)
-      #     pour qu'aucune des docs existantes ne pointe vers une image
-      #     introuvable.
+      # EN: Compute the image tags. Every push gets `latest` and a `${sha}` tag
+      #     under both the short (`nexanote`) and explicit (`nexanote-backend`)
+      #     names — existing docs and the bundled docker-compose.yml reference
+      #     the `-backend` variant while README points at the short one, so
+      #     keeping both in sync avoids broken pull commands either way.
+      #     A `vX.Y.Z` tag push additionally publishes the clean `X.Y.Z`
+      #     version tag (the `v` is stripped), so one release tag drives the
+      #     Docker version exactly like the APK and F-Droid metadata.
+      # FR: Calcule les tags. Chaque push reçoit `latest` et `${sha}` sous les
+      #     deux noms ; un tag `vX.Y.Z` ajoute en plus le tag de version `X.Y.Z`.
+      - name: Compute image tags
+        id: meta
+        run: |
+          set -euo pipefail
+          tags=(
+            "thezupzup/nexanote:latest"
+            "thezupzup/nexanote:${GITHUB_SHA}"
+            "thezupzup/nexanote-backend:latest"
+            "thezupzup/nexanote-backend:${GITHUB_SHA}"
+          )
+          # On a vX.Y.Z tag, publish the clean X.Y.Z version tag too.
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            version="${GITHUB_REF_NAME#v}"
+            tags+=("thezupzup/nexanote:${version}")
+            tags+=("thezupzup/nexanote-backend:${version}")
+          fi
+          {
+            echo "tags<<EOF"
+            printf '%s\n' "${tags[@]}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build and push multi-arch image
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
           platforms: linux/amd64,linux/arm64
-          tags: |
-            thezupzup/nexanote:latest
-            thezupzup/nexanote:${{ github.sha }}
-            thezupzup/nexanote-backend:latest
-            thezupzup/nexanote-backend:${{ github.sha }}
+          tags: ${{ steps.meta.outputs.tags }}
