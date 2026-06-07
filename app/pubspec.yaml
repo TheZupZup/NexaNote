@@ -33,6 +33,11 @@ dependencies:
   # Local SQLite storage for offline-first note saving
   sqflite: ^2.3.0
 
+  # Reads the real installed version (versionName/versionCode) from the
+  # platform package metadata so the About screen never hardcodes it. FOSS,
+  # no Google Play services, F-Droid friendly.
+  package_info_plus: ^10.1.0
+
 dev_dependencies:
   flutter_test:
     sdk: flutter
