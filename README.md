@@ -208,6 +208,58 @@ python -m pytest tests/ -v
 
 ---
 
+## Release process
+
+NexaNote uses a single **`vX.Y.Z`** git tag to drive every published version.
+The Android `versionName`/`versionCode`, the Flutter `pubspec.yaml`, the GitHub
+Release title, the APK asset, the Docker image tags, and the F-Droid metadata
+all follow that one tag — there is no version string hardcoded in more than one
+place.
+
+To cut a release (maintainers):
+
+1. **Bump the version.** Choose the next `versionName` (semver `X.Y.Z`) and a
+   higher `versionCode` (a monotonically increasing integer):
+
+   ```bash
+   python scripts/bump_version.py 1.0.2 3
+   ```
+
+   This rewrites `app/pubspec.yaml` to `1.0.2+3`, adds the matching F-Droid
+   build entry in `metadata/com.nexanote.app.yml` (with `commit: v1.0.2`), and
+   rolls the `## Unreleased` section of `CHANGELOG.md` into a `## v1.0.2` entry.
+   It does **not** create a git tag.
+
+2. **Commit** the bump:
+
+   ```bash
+   git commit -am "release: NexaNote v1.0.2"
+   ```
+
+3. **Tag** the release `vX.Y.Z` (the tag must match the `pubspec.yaml`
+   versionName):
+
+   ```bash
+   git tag v1.0.2
+   ```
+
+4. **Push** the commit and the tag:
+
+   ```bash
+   git push && git push origin v1.0.2
+   ```
+
+5. **GitHub Actions publishes** the artifacts. The Docker workflow pushes
+   `thezupzup/nexanote:1.0.2` and `thezupzup/nexanote:latest`; the Android
+   workflow builds the release APK, titles the GitHub Release
+   **NexaNote v1.0.2**, and attaches the stable-named `NexaNote-Android.apk`
+   asset that Obtainium tracks.
+
+Both workflows fail fast if the tag and the `pubspec.yaml` version disagree, so
+the published version always matches the tag you pushed.
+
+---
+
 ## Storage layout
 
 Everything lives under your `data` directory as plain files:
