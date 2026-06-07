@@ -54,6 +54,25 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   registry atomically, so a crash mid-session can never leave a corrupt or
   half-written `.nexanote_sync_state.json`.
 
+### Android & releases
+
+- **Obtainium-friendly APK publishing.** Tagged `vX.Y.Z` releases attach a
+  stable-named `NexaNote-Android.apk` asset, so
+  [Obtainium](https://github.com/ImranR98/Obtainium) can be pointed at the
+  GitHub repo and auto-update from the release tags — no in-app updater, no
+  Google Play, no analytics. See the README for setup.
+- **Release/version guardrails.** The Android release workflow fails fast if the
+  release tag does not match the pubspec `versionName`, or if the build did not
+  produce an APK. `pubspec.yaml` stays the single source of truth for the
+  version, and Android's versionName/versionCode follow it.
+- **Real version in About.** Settings → About now shows the installed version
+  read from the platform package metadata (via `package_info_plus`) instead of a
+  hardcoded string, and links to the correct GitHub repository.
+- **F-Droid alignment kept.** Release metadata stays aligned for a future
+  F-Droid submission (applicationId `com.nexanote.app`, `MPL-2.0`, no
+  proprietary or Google Play dependencies; the `INTERNET` permission only
+  reaches your own backend / WebDAV server).
+
 ---
 
 ## v1.0.0 — File-based storage

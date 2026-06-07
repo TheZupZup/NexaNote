@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import '../services/app_state.dart';
 import '../services/server_url.dart';
 
@@ -42,12 +43,32 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _autoSync = false;
   Timer? _autoSyncTimer;
 
+  // Installed app version, read from the platform package metadata so the
+  // About card never drifts from the actual build. Empty until loaded (or if
+  // PackageInfo is unavailable, e.g. in a unit-test/desktop context).
+  String _appVersion = '';
+
   @override
   void initState() {
     super.initState();
     _loadSettings();
     _loadStats();
     _loadStorageInfo();
+    _loadAppVersion();
+  }
+
+  /// Reads the real installed version (pubspec `versionName+versionCode`,
+  /// surfaced as the platform package's versionName/versionCode) and shows it
+  /// in the About card. No network call, no Google Play services.
+  Future<void> _loadAppVersion() async {
+    try {
+      final info = await PackageInfo.fromPlatform();
+      if (!mounted) return;
+      setState(() => _appVersion = info.version);
+    } catch (_) {
+      // Package metadata isn't available everywhere (some test/desktop
+      // contexts); fall back to no version rather than crashing the screen.
+    }
   }
 
   Future<void> _loadSettings() async {
@@ -607,13 +628,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   ),
                   title: const Text('NexaNote',
                       style: TextStyle(fontWeight: FontWeight.bold)),
-                  subtitle: const Text('v0.1.0 — Open-source note-taking'),
+                  subtitle: Text(_appVersion.isEmpty
+                      ? 'Open-source note-taking'
+                      : 'v$_appVersion — Open-source note-taking'),
                 ),
                 const Divider(height: 1),
                 ListTile(
                   leading: const Icon(Icons.code, size: 20),
                   title: const Text('GitHub'),
-                  subtitle: const Text('github.com/YOUR_USER/NexaNote'),
+                  subtitle: const Text('github.com/TheZupZup/NexaNote'),
                   trailing: const Icon(Icons.open_in_new, size: 16),
                   onTap: () {},
                 ),

@@ -1,5 +1,13 @@
 name: Build NexaNote Android APK
 
+# Releasing (the pubspec is the single source of truth for the version):
+#   1. Bump `version:` in app/pubspec.yaml (e.g. 1.0.1+3 — versionName+versionCode).
+#   2. Commit, then tag the matching versionName: `git tag v1.0.1 && git push --tags`.
+# A `vX.Y.Z` tag builds a release-mode APK, attaches it to the GitHub Release as
+# a stable-named asset (NexaNote-Android.apk) so Obtainium can track updates, and
+# titles the release "NexaNote vX.Y.Z". The job fails if the tag does not match
+# the pubspec versionName, or if the APK is missing.
+
 on:
   push:
     branches: ["main"]
@@ -16,6 +24,22 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      # On a vX.Y.Z tag the release version must match the app's versionName
+      # (the part of pubspec `version:` before the `+build` suffix). Fail fast
+      # so we never publish a release whose tag and in-app version disagree.
+      - name: Verify tag matches pubspec version
+        if: github.ref_type == 'tag'
+        run: |
+          set -euo pipefail
+          tag_version="${GITHUB_REF_NAME#v}"
+          pubspec_version="$(sed -n 's/^version:[[:space:]]*\([0-9][0-9.]*\).*/\1/p' app/pubspec.yaml | head -n1)"
+          echo "Tag versionName:     ${tag_version}"
+          echo "pubspec versionName: ${pubspec_version}"
+          if [ "${tag_version}" != "${pubspec_version}" ]; then
+            echo "::error::Release tag v${tag_version} does not match pubspec.yaml versionName ${pubspec_version}. Bump app/pubspec.yaml before tagging."
+            exit 1
+          fi
 
       - name: Setup Java
         uses: actions/setup-java@v4
@@ -55,14 +79,26 @@ jobs:
           cd app
           flutter build apk --release
 
-      - name: Prepare APK file
+      # Publish a stable asset name (NexaNote-Android.apk) so Obtainium can
+      # match the APK across releases. A versioned copy is kept alongside it
+      # for the workflow artifact / human download. Fail loudly if the build
+      # did not actually produce an APK.
+      - name: Prepare APK asset
         run: |
-          mkdir -p release
-          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
-            cp app/build/app/outputs/flutter-apk/app-release.apk "release/NexaNote-Android-${GITHUB_REF_NAME}.apk"
-          else
-            cp app/build/app/outputs/flutter-apk/app-release.apk "release/NexaNote-Android-dev-${GITHUB_SHA::7}.apk"
+          set -euo pipefail
+          src="app/build/app/outputs/flutter-apk/app-release.apk"
+          if [ ! -f "${src}" ]; then
+            echo "::error::Expected APK not found at ${src} — the release build did not produce an APK."
+            exit 1
           fi
+          mkdir -p release
+          cp "${src}" "release/NexaNote-Android.apk"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            cp "${src}" "release/NexaNote-Android-${GITHUB_REF_NAME}.apk"
+          else
+            cp "${src}" "release/NexaNote-Android-dev-${GITHUB_SHA::7}.apk"
+          fi
+          ls -l release
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
@@ -71,11 +107,14 @@ jobs:
           path: release/*.apk
           if-no-files-found: error
 
+      # Attach only the stable-named asset to the GitHub Release so Obtainium
+      # always finds NexaNote-Android.apk. `fail_on_unmatched_files` turns a
+      # missing APK into a failed release instead of an empty one.
       - name: Create GitHub Release and attach APK
         if: github.ref_type == 'tag'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
           name: NexaNote ${{ github.ref_name }}
-          files: release/*.apk
+          files: release/NexaNote-Android.apk
           fail_on_unmatched_files: true

@@ -123,21 +123,50 @@ Otherwise, set both URLs explicitly.
 
 ## Android APK
 
-There is no Play Store listing yet. To install on Android:
+There is no Play Store listing — NexaNote ships its Android builds through
+**GitHub Releases**. Every release attaches a stable-named asset,
+**`NexaNote-Android.apk`**, so the download link and update tooling stay
+predictable from one version to the next.
 
-1. Go to the [GitHub Releases](https://github.com/TheZupZup/NexaNote/releases)
+### Install with Obtainium (recommended)
+
+[Obtainium](https://github.com/ImranR98/Obtainium) installs and auto-updates
+apps straight from their GitHub Releases — no Play Store, no Google account, no
+tracking. To follow NexaNote:
+
+1. Install Obtainium (it's on F-Droid, or from its own GitHub Releases).
+2. Tap **Add App** and fill in:
+   - **Source type:** GitHub
+   - **Repository / App URL:** `https://github.com/TheZupZup/NexaNote`
+   - **APK asset (if asked to filter):** `NexaNote-Android.apk`
+3. Add the app. Obtainium reads the newest `vX.Y.Z` release, installs
+   `NexaNote-Android.apk`, and offers an update whenever a newer release **tag**
+   is published.
+
+Because the asset name never changes between releases, Obtainium matches it
+automatically and tracks new versions from the release tags.
+
+### Manual install
+
+Prefer to do it by hand?
+
+1. Open the [GitHub Releases](https://github.com/TheZupZup/NexaNote/releases)
    page.
-2. Download the latest **`NexaNote-Android-*.apk`** asset.
-3. Open the downloaded file to install it manually.
+2. Download the **`NexaNote-Android.apk`** asset from the latest release.
+3. Open the downloaded file to install it.
 4. If prompted, allow **install from unknown sources** for your browser or file
    manager.
 
 The Android build is functional but still being polished, so expect rough edges.
+The in-app **Settings → About** card shows the exact installed version.
 
 > **F-Droid readiness in progress.** A draft F-Droid metadata file lives at
-> [`metadata/com.nexanote.app.yml`](metadata/com.nexanote.app.yml). NexaNote
-> has not been submitted to fdroiddata yet — GitHub Releases remains the
-> official source for the Android APK for the time being.
+> [`metadata/com.nexanote.app.yml`](metadata/com.nexanote.app.yml) and the
+> release metadata is kept F-Droid-aligned: applicationId `com.nexanote.app`,
+> `MPL-2.0` license, no Google Play or proprietary dependencies, and the
+> `INTERNET` permission is used only to reach *your own* backend / WebDAV
+> server. NexaNote has not been submitted to fdroiddata yet — GitHub Releases
+> remains the official source for the Android APK for the time being.
 
 ---
 
