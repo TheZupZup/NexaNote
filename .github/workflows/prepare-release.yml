@@ -1,25 +1,34 @@
 name: Prepare release
 
-# Cut a NexaNote release entirely from the GitHub web UI — no local checkout
-# needed. Given a versionName (X.Y.Z) and versionCode, this workflow:
+# Cut a NexaNote release from the GitHub web UI — no local checkout needed.
+# Given a versionName (X.Y.Z) and versionCode, this workflow:
 #   1. checks out main,
 #   2. runs scripts/bump_version.py to update app/pubspec.yaml, the F-Droid
 #      metadata, and CHANGELOG.md,
-#   3. commits the bump as `chore: release vX.Y.Z` (github-actions[bot] author),
-#   4. pushes the commit to main, and
-#   5. creates and pushes the `vX.Y.Z` tag.
+#   3. commits the bump as `chore: release vX.Y.Z` on a new `release/vX.Y.Z`
+#      branch (github-actions[bot] author),
+#   4. pushes that release branch, and
+#   5. opens a pull request into main titled `chore: release vX.Y.Z`.
 #
-# It only *prepares* the release. Publishing stays with the existing
-# tag-triggered workflows: android-release.yml builds and attaches the APK and
-# docker-publish.yml publishes the Docker image when a `vX.Y.Z` tag appears.
+# It NEVER pushes to main directly — main is a protected branch, so the bump
+# lands only when a maintainer merges the PR. It also no longer creates the
+# `vX.Y.Z` tag here: the tag has to point at the commit that actually lands on
+# main, which exists only after the merge (and may be a squash/rebase commit).
+# After merging the release PR, tag the merge commit and push the tag:
 #
-# Triggering those publish workflows: a push made with the default GITHUB_TOKEN
-# does NOT start other workflow runs (GitHub blocks recursive triggers). So for
-# the tag push below to actually kick off android-release / docker-publish, add a
-# repository secret named RELEASE_PAT — a PAT (or GitHub App token) with
-# `contents: write` and workflow permissions — which is used to push when set.
-# Without it the bump, commit, and tag still succeed; you would then start the
-# publish workflows manually (re-push the tag, or run them via workflow_dispatch).
+#   git tag vX.Y.Z <merge-commit> && git push origin vX.Y.Z
+#
+# That tag is what drives publishing: android-release.yml builds and attaches
+# the APK and docker-publish.yml publishes the Docker image when `vX.Y.Z`
+# appears.
+#
+# Triggering CI on the PR: anything created or pushed with the default
+# GITHUB_TOKEN does NOT start other workflow runs (GitHub blocks recursive
+# triggers). So for this release PR to auto-run the pull_request checks
+# (python-app.yml), add a repository secret named RELEASE_PAT — a PAT (or
+# GitHub App token) with `contents: write` and `pull-requests: write` — which
+# is used when set. Without it the branch, commit, and PR still succeed; the
+# PR's checks just won't run until the branch is pushed to again.
 
 on:
   workflow_dispatch:
@@ -33,7 +42,7 @@ on:
         required: true
         type: string
 
-# Never let two release-prep runs race on main / the tag at the same time.
+# Never let two release-prep runs race on the same release branch / PR.
 concurrency:
   group: prepare-release
   cancel-in-progress: false
@@ -44,6 +53,7 @@ jobs:
 
     permissions:
       contents: write
+      pull-requests: write
 
     # Pass inputs through the environment rather than interpolating them into
     # run scripts, so a value like `$(...)` can never be shell-injected.
@@ -65,6 +75,7 @@ jobs:
             exit 1
           fi
           echo "TAG=v${VERSION_NAME}" >> "${GITHUB_ENV}"
+          echo "RELEASE_BRANCH=release/v${VERSION_NAME}" >> "${GITHUB_ENV}"
           echo "Preparing release v${VERSION_NAME} (versionCode ${VERSION_CODE})."
 
       - name: Checkout main
@@ -73,8 +84,8 @@ jobs:
           ref: main
           # Full history + tags so the "tag already exists" check is reliable.
           fetch-depth: 0
-          # Prefer a PAT/App token so the resulting tag push triggers the
-          # tag-driven publish workflows; fall back to GITHUB_TOKEN otherwise.
+          # Prefer a PAT/App token so the release PR can trigger the
+          # pull_request checks; fall back to GITHUB_TOKEN otherwise.
           token: ${{ secrets.RELEASE_PAT || github.token }}
           persist-credentials: true
 
@@ -120,16 +131,74 @@ jobs:
           echo "Files changed by the bump:"
           git status --porcelain
 
-      - name: Commit, tag, and push
+      - name: Commit the bump on a release branch and push
         shell: bash
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Start the release branch from the checked-out main. -C resets it if a
+          # previous run left one behind, so re-runs regenerate a clean bump.
+          git switch -C "${RELEASE_BRANCH}"
           git add -A
           git commit -m "chore: release ${TAG}"
-          git tag "${TAG}"
-          # Push the commit and the tag together so we never leave main updated
-          # without its matching tag (or vice versa).
-          git push --atomic origin "HEAD:refs/heads/main" "refs/tags/${TAG}"
-          echo "Pushed release commit to main and tag ${TAG}."
+          # Force-push: the release/* branch is owned entirely by this workflow
+          # and guarded by the concurrency group, so overwriting a stale branch
+          # from an earlier failed run is the intended behaviour. main is never
+          # touched — the bump reaches it only when the PR below is merged.
+          git push --force -u origin "${RELEASE_BRANCH}"
+          echo "Pushed ${RELEASE_BRANCH}."
+
+      - name: Open the release pull request
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PAT || github.token }}
+        run: |
+          set -euo pipefail
+
+          # Build the PR body from a literal template (quoted heredoc, so the
+          # markdown backticks stay literal and nothing shell-expands), then fill
+          # in the placeholders with our already-validated release vars. The
+          # values are `v?X.Y.Z` / digits, so they are safe in the sed RHS.
+          cat > pr-body.template.md <<'EOF'
+          ## Release __TAG__ (versionCode __VERSION_CODE__)
+
+          Automated by the **Prepare release** workflow via `scripts/bump_version.py`.
+          Merging this PR lands the version bump on `main` without pushing to the
+          protected branch directly.
+
+          ### What changed
+
+          - **Version bump** — `app/pubspec.yaml` set to `version: __VERSION_NAME__+__VERSION_CODE__`. This is the single source of truth: Android's versionName/versionCode, the release tag, and the in-app About screen all follow it.
+          - **Changelog update** — `CHANGELOG.md`: the `## Unreleased` section is rolled into `## __TAG__`, leaving a fresh `## Unreleased` placeholder.
+          - **F-Droid metadata update** — `metadata/com.nexanote.app.yml`: a new build entry for __VERSION_NAME__ (versionCode __VERSION_CODE__, `commit: __TAG__`) plus refreshed `CurrentVersion` / `CurrentVersionCode` pointers.
+
+          ### After merging
+
+          Tag the merge commit `__TAG__` and push the tag to start the APK
+          (`android-release.yml`) and Docker (`docker-publish.yml`) publish
+          workflows:
+
+          ```
+          git tag __TAG__ <merge-commit> && git push origin __TAG__
+          ```
+          EOF
+
+          sed \
+            -e "s/__TAG__/${TAG}/g" \
+            -e "s/__VERSION_NAME__/${VERSION_NAME}/g" \
+            -e "s/__VERSION_CODE__/${VERSION_CODE}/g" \
+            pr-body.template.md > pr-body.md
+
+          title="chore: release ${TAG}"
+
+          # On a re-run the branch is force-pushed above; update the existing PR
+          # instead of failing on "a pull request already exists".
+          existing="$(gh pr list --head "${RELEASE_BRANCH}" --base main --state open --json number --jq '.[0].number // empty')"
+          if [[ -n "${existing}" ]]; then
+            gh pr edit "${existing}" --title "${title}" --body-file pr-body.md
+            echo "Updated existing release PR #${existing} for ${RELEASE_BRANCH}."
+          else
+            gh pr create --base main --head "${RELEASE_BRANCH}" --title "${title}" --body-file pr-body.md
+            echo "Opened release PR for ${RELEASE_BRANCH}."
+          fi
