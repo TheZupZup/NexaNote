@@ -557,4 +557,173 @@ void main() {
       expect(coldState.webdavUrl, 'https://nexanote.example.com/webdav');
     });
   });
+
+  // ── Local-first offline mode ───────────────────────────────────────
+  //
+  // NexaNote must be usable with no backend at all: a fresh install can
+  // choose "Use offline", create and edit notes against the on-device
+  // SQLite store, and only later (optionally) connect a server for sync.
+  // Existing connected users must be untouched by any of this.
+
+  group('local-first offline mode', () {
+    setUp(() {
+      TestWidgetsFlutterBinding.ensureInitialized();
+      SharedPreferences.setMockInitialValues({});
+    });
+
+    test('fresh launch needs onboarding; choosing offline clears it', () async {
+      final s = AppState(
+        localService: service,
+        clientFactory: (_) => _StubApi(shouldThrow: true),
+      );
+      await s.initLocal();
+      expect(s.needsOnboarding, isTrue);
+      expect(s.localMode, isFalse);
+
+      await s.enableLocalMode();
+
+      expect(s.localMode, isTrue);
+      expect(s.needsOnboarding, isFalse);
+      expect(s.isBackendConfigured, isFalse);
+      // Local mode is a deliberate choice, not a failure — no scary banner.
+      expect(s.isBackendAvailable, isFalse);
+      expect(s.backendErrorMessage, isNull);
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getBool(kPrefsLocalMode), isTrue);
+    });
+
+    test(
+        'a cold start in local mode opens HomeScreen without pinging a backend',
+        () async {
+      SharedPreferences.setMockInitialValues({kPrefsLocalMode: true});
+      final s = AppState(
+        localService: service,
+        clientFactory: (_) => _StubApi(shouldThrow: true),
+      );
+      await s.init();
+
+      expect(s.localMode, isTrue);
+      expect(s.needsOnboarding, isFalse,
+          reason: 'router must route straight to HomeScreen in local mode');
+      expect(s.isBackendAvailable, isFalse);
+      expect(s.backendErrorMessage, isNull);
+    });
+
+    test('local notes can be created and edited without a backend URL',
+        () async {
+      final s = AppState(
+        localService: service,
+        clientFactory: (_) => _StubApi(shouldThrow: true),
+      );
+      await s.enableLocalMode();
+
+      final note = await s.createNote(title: 'First note', noteType: 'typed');
+      expect(s.notes.map((n) => n.title), contains('First note'));
+
+      // Persisted to the local SQLite store, not just held in memory.
+      final stored = await service.getNoteById(note.id);
+      expect(stored, isNotNull);
+      expect(stored!.title, 'First note');
+
+      // Title + content edits persist locally and round-trip through getNote.
+      await s.savePageText(note.id, 1, 'Hello world');
+      await s.updateNoteTitle(note.id, 'Renamed');
+      final full = await s.getNote(note.id);
+      expect(full.title, 'Renamed');
+      expect(full.pages?.first.typedContent, 'Hello world');
+    });
+
+    test('local notebooks can be created offline', () async {
+      final s = AppState(
+        localService: service,
+        clientFactory: (_) => _StubApi(shouldThrow: true),
+      );
+      await s.enableLocalMode();
+
+      final nb = await s.createNotebook('Personal', '#6366f1');
+      expect(s.notebooks.map((n) => n.name), contains('Personal'));
+      final stored = await service.getNotebooks();
+      expect(stored.map((n) => n.id), contains(nb.id));
+    });
+
+    test('sync without a backend shows a friendly message and no error',
+        () async {
+      final s = AppState(
+        localService: service,
+        clientFactory: (_) => _StubApi(shouldThrow: true),
+      );
+      await s.enableLocalMode();
+
+      final msg = await s.triggerSync();
+      expect(msg, kLocalModeSyncMessage);
+      expect(s.syncMessage, kLocalModeSyncMessage);
+      expect(s.syncError, isNull);
+      expect(s.isSyncing, isFalse);
+
+      // The auto-sync path (syncNow) is also a friendly no-op.
+      final result = await s.syncNow();
+      expect(result.notesPushed, 0);
+      expect(result.notesPulled, 0);
+      expect(s.syncError, isNull);
+    });
+
+    test('configuring a backend later leaves local mode and uses the backend',
+        () async {
+      final stub = _StubApi(); // ping succeeds
+      final s = AppState(localService: service, clientFactory: (_) => stub);
+      await s.enableLocalMode();
+      expect(s.localMode, isTrue);
+
+      await s.connect(url: 'http://192.0.2.10:8766');
+
+      expect(s.localMode, isFalse);
+      expect(s.isBackendConfigured, isTrue);
+      expect(s.isBackendAvailable, isTrue);
+      expect(s.hasEverConnected, isTrue);
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getBool(kPrefsLocalMode), isFalse);
+      expect(prefs.getString(kPrefsApiUrl), 'http://192.0.2.10:8766');
+
+      // After connecting, createNote goes through the backend, not SQLite.
+      final note = await s.createNote(title: 'Server note', noteType: 'typed');
+      expect(note.id, startsWith('srv-'));
+      expect(stub.createNoteCalls, greaterThan(0));
+    });
+
+    test(
+        'notes taken in local mode are uploaded when a backend is configured '
+        'later', () async {
+      final stub = _StubApi(); // ping + API calls succeed
+      final s = AppState(localService: service, clientFactory: (_) => stub);
+      await s.enableLocalMode();
+      await s.createNote(title: 'Offline note', noteType: 'typed');
+      expect(stub.createNoteCalls, 0,
+          reason: 'creating a note in local mode must not hit the backend');
+
+      await s.connect(url: 'http://192.0.2.10:8766');
+
+      expect(s.localMode, isFalse);
+      expect(stub.createNoteCalls, greaterThan(0),
+          reason: 'the offline note should be pushed to the backend on switch');
+    });
+
+    test('existing connected users are not reset to onboarding or local mode',
+        () async {
+      // Simulates an upgrade from a pre-local-mode build: the only persisted
+      // keys are the saved URL and the has-ever-connected flag.
+      SharedPreferences.setMockInitialValues({
+        kPrefsApiUrl: 'http://192.0.2.10:8766',
+        kPrefsHasEverConnected: true,
+      });
+      final s =
+          AppState(localService: service, clientFactory: (_) => _StubApi());
+      await s.init();
+
+      expect(s.hasEverConnected, isTrue);
+      expect(s.localMode, isFalse);
+      expect(s.needsOnboarding, isFalse);
+      expect(s.isBackendConfigured, isTrue);
+      expect(s.apiUrl, 'http://192.0.2.10:8766');
+    });
+  });
 }

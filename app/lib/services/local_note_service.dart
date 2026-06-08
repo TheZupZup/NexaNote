@@ -57,6 +57,12 @@ class LocalNoteService {
   Future<Note?> getNoteByRemoteId(String remoteId) =>
       _repo.getNoteByRemoteId(remoteId);
   Future<void> upsertNote(Note note) => _repo.upsertNote(note);
+
+  /// Soft-deletes a note (sets `is_deleted`, marks it `modified`) so the
+  /// deletion can later propagate once a backend is configured. Used by the
+  /// local-mode delete path; sync uses [hardDeleteNote] for server-driven
+  /// removals.
+  Future<void> deleteNote(String id) => _repo.deleteNote(id);
   Future<void> upsertNotebook(Notebook notebook) =>
       _repo.upsertNotebook(notebook);
   Future<int> hardDeleteNote(String id) => _repo.hardDeleteNote(id);

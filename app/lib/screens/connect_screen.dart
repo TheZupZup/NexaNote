@@ -18,6 +18,7 @@ class ConnectScreen extends StatefulWidget {
 class _ConnectScreenState extends State<ConnectScreen> {
   late final TextEditingController _controller;
   bool _connecting = false;
+  bool _enteringOffline = false;
   String? _error;
   bool _showDetails = false;
 
@@ -36,6 +37,15 @@ class _ConnectScreenState extends State<ConnectScreen> {
   void dispose() {
     _controller.dispose();
     super.dispose();
+  }
+
+  /// Enters local-only mode. NexaNote is local-first: the user can start
+  /// taking notes immediately with no backend. AppState flips into local mode
+  /// and notifies, so the root router rebuilds this screen away to HomeScreen.
+  Future<void> _useOffline() async {
+    final state = context.read<AppState>();
+    setState(() { _enteringOffline = true; _error = null; });
+    await state.enableLocalMode();
   }
 
   Future<void> _connect() async {
@@ -94,12 +104,53 @@ class _ConnectScreenState extends State<ConnectScreen> {
                         )),
                 const SizedBox(height: 8),
                 Text(
-                  'Enter the address of your NexaNote backend server.',
+                  'Take notes right away — they are saved privately on this '
+                  'device. Connecting a server is optional and only needed to '
+                  'sync across devices.',
                   style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                         color: scheme.onSurface.withOpacity(0.6),
                       ),
                 ),
-                const SizedBox(height: 32),
+                const SizedBox(height: 24),
+
+                // Primary path — start using the app immediately, no backend.
+                SizedBox(
+                  width: double.infinity,
+                  child: FilledButton.icon(
+                    onPressed: (_connecting || _enteringOffline)
+                        ? null
+                        : _useOffline,
+                    icon: _enteringOffline
+                        ? const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(
+                                strokeWidth: 2, color: Colors.white),
+                          )
+                        : const Icon(Icons.cloud_off_outlined),
+                    label: Text(
+                        _enteringOffline ? 'Starting...' : 'Use NexaNote offline'),
+                    style: FilledButton.styleFrom(
+                      backgroundColor: const Color(0xFF6366F1),
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 24),
+
+                // Optional path — connect a backend for WebDAV/NAS sync.
+                Row(children: [
+                  const Expanded(child: Divider()),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 12),
+                    child: Text('or connect to a server',
+                        style: TextStyle(
+                            fontSize: 12,
+                            color: scheme.onSurface.withOpacity(0.5))),
+                  ),
+                  const Expanded(child: Divider()),
+                ]),
+                const SizedBox(height: 20),
 
                 // URL field
                 TextField(
@@ -196,22 +247,23 @@ class _ConnectScreenState extends State<ConnectScreen> {
 
                 const SizedBox(height: 16),
 
-                // Connect button
+                // Connect button (optional path)
                 SizedBox(
                   width: double.infinity,
-                  child: FilledButton.icon(
-                    onPressed: _connecting ? null : _connect,
+                  child: OutlinedButton.icon(
+                    onPressed: (_connecting || _enteringOffline)
+                        ? null
+                        : _connect,
                     icon: _connecting
                         ? const SizedBox(
                             width: 18,
                             height: 18,
-                            child: CircularProgressIndicator(
-                                strokeWidth: 2, color: Colors.white),
+                            child: CircularProgressIndicator(strokeWidth: 2),
                           )
                         : const Icon(Icons.arrow_forward),
-                    label: Text(_connecting ? 'Connecting...' : 'Connect'),
-                    style: FilledButton.styleFrom(
-                      backgroundColor: const Color(0xFF6366F1),
+                    label: Text(
+                        _connecting ? 'Connecting...' : 'Connect to server'),
+                    style: OutlinedButton.styleFrom(
                       padding: const EdgeInsets.symmetric(vertical: 14),
                     ),
                   ),

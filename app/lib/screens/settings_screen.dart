@@ -76,17 +76,28 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final state = context.read<AppState>();
     setState(() {
       _apiUrlCtrl.text = state.apiUrl;
-      _nasUrlCtrl.text = prefs.getString('nas_url') ?? 'http://192.168.132.214:5005/';
-      _nasUserCtrl.text = prefs.getString('nas_user') ?? 'admin';
+      // No prefilled server defaults — a fresh install must not ship someone
+      // else's NAS address. The field hints show the expected shape instead.
+      _nasUrlCtrl.text = prefs.getString('nas_url') ?? '';
+      _nasUserCtrl.text = prefs.getString('nas_user') ?? '';
       _nasPassCtrl.text = prefs.getString('nas_pass') ?? '';
       _autoSync = prefs.getBool('auto_sync') ?? false;
     });
-    if (_autoSync) _startAutoSync();
+    // Never auto-sync in local mode — there is no backend to sync against.
+    if (_autoSync && !state.localMode) _startAutoSync();
     await _loadSyncStatus();
   }
 
   Future<void> _loadStats() async {
     final state = context.read<AppState>();
+    if (state.localMode) {
+      // No backend to query — show counts from the on-device store instead.
+      setState(() => _stats = {
+            'notebooks': state.notebooks.length,
+            'notes': state.notes.length,
+          });
+      return;
+    }
     try {
       final stats = await state.client.getStats();
       setState(() => _stats = stats);
@@ -95,6 +106,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Future<void> _loadStorageInfo() async {
     final state = context.read<AppState>();
+    if (state.localMode) return;
     try {
       final info = await state.client.getStorageInfo();
       final prefs = await SharedPreferences.getInstance();
@@ -127,6 +139,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Future<void> _loadSyncStatus() async {
     final state = context.read<AppState>();
+    if (state.localMode) return;
     try {
       final status = await state.client.getSyncStatus();
       setState(() => _syncStatus = status);
@@ -140,13 +153,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
     await prefs.setString('nas_pass', _nasPassCtrl.text);
     await prefs.setBool('auto_sync', _autoSync);
 
-    // Configure le sync sur le backend
+    // Push the WebDAV credentials to the backend, which performs the actual
+    // sync. In local mode there is no backend to configure — just persist the
+    // values locally so they're ready once the user connects one.
     final state = context.read<AppState>();
-    await state.client.configureSync(
-      serverUrl: _nasUrlCtrl.text.trim(),
-      username: _nasUserCtrl.text.trim(),
-      password: _nasPassCtrl.text,
-    );
+    if (state.isBackendConfigured) {
+      await state.client.configureSync(
+        serverUrl: _nasUrlCtrl.text.trim(),
+        username: _nasUserCtrl.text.trim(),
+        password: _nasPassCtrl.text,
+      );
+    }
 
     setState(() => _isSaved = true);
     Future.delayed(const Duration(seconds: 2), () {
@@ -233,6 +250,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    final appState = context.watch<AppState>();
+    final localMode = appState.localMode;
 
     return Scaffold(
       appBar: AppBar(
@@ -254,6 +273,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
+
+          // ── Mode (local vs backend) ────────────────────────────
+          _ModeCard(localMode: localMode),
+          const SizedBox(height: 24),
 
           // ── Stats ──────────────────────────────────────────────
           _SectionTitle(icon: Icons.bar_chart, title: 'Storage'),
@@ -288,7 +311,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     controller: _nasUrlCtrl,
                     decoration: const InputDecoration(
                       labelText: 'NAS WebDAV URL',
-                      hintText: 'http://192.168.132.214:5005/',
+                      hintText: 'http://192.168.1.10:5005/',
                       prefixIcon: Icon(Icons.dns_outlined),
                     ),
                   ),
@@ -323,21 +346,25 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   ),
                   const SizedBox(height: 16),
 
-                  // Auto sync toggle
+                  // Auto sync toggle — disabled until a backend is configured.
                   SwitchListTile(
                     contentPadding: EdgeInsets.zero,
                     title: const Text('Auto sync every 5 minutes'),
-                    subtitle: const Text('Sync automatically in background'),
-                    value: _autoSync,
+                    subtitle: Text(localMode
+                        ? 'Available once a backend is configured'
+                        : 'Sync automatically in background'),
+                    value: _autoSync && !localMode,
                     activeColor: const Color(0xFF6366F1),
-                    onChanged: (v) {
-                      setState(() => _autoSync = v);
-                      if (v) {
-                        _startAutoSync();
-                      } else {
-                        _autoSyncTimer?.cancel();
-                      }
-                    },
+                    onChanged: localMode
+                        ? null
+                        : (v) {
+                            setState(() => _autoSync = v);
+                            if (v) {
+                              _startAutoSync();
+                            } else {
+                              _autoSyncTimer?.cancel();
+                            }
+                          },
                   ),
 
                   const SizedBox(height: 8),
@@ -556,13 +583,25 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
           const SizedBox(height: 24),
 
-          // ── Backend API ────────────────────────────────────────
-          _SectionTitle(icon: Icons.api, title: 'Backend API'),
+          // ── Backend API (optional) ─────────────────────────────
+          _SectionTitle(icon: Icons.api, title: 'Backend API (optional)'),
           Card(
             child: Padding(
               padding: const EdgeInsets.all(16),
               child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
+                  Text(
+                    localMode
+                        ? 'Optional — connect a NexaNote backend to enable '
+                            'WebDAV/NAS sync. Your notes stay on this device '
+                            'until you do.'
+                        : 'Connect a NexaNote backend for WebDAV/NAS sync.',
+                    style: TextStyle(
+                        fontSize: 12,
+                        color: scheme.onSurface.withOpacity(0.6)),
+                  ),
+                  const SizedBox(height: 12),
                   TextField(
                     controller: _apiUrlCtrl,
                     decoration: const InputDecoration(
@@ -657,6 +696,57 @@ class _SettingsScreenState extends State<SettingsScreen> {
 }
 
 // ── Widgets helpers ──────────────────────────────────────────────
+
+/// Surfaces whether the app is running on-device only ("local mode") or
+/// against a configured backend, so the user is never left guessing whether
+/// sync is active. Spells out that local mode is a choice, not a failure.
+class _ModeCard extends StatelessWidget {
+  final bool localMode;
+  const _ModeCard({required this.localMode});
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final color = localMode ? scheme.secondary : Colors.green;
+    final title = localMode ? 'Local mode enabled' : 'Backend configured';
+    final subtitle = localMode
+        ? 'Backend not configured — your notes are stored on this device. '
+            'Sync is disabled until you configure a backend/WebDAV server below.'
+        : 'Notes sync through your backend. WebDAV/NAS sync can be configured '
+            'below.';
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(
+              localMode ? Icons.cloud_off_outlined : Icons.cloud_done_outlined,
+              size: 22,
+              color: color,
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(title,
+                      style: const TextStyle(
+                          fontWeight: FontWeight.bold, fontSize: 14)),
+                  const SizedBox(height: 4),
+                  Text(subtitle,
+                      style: TextStyle(
+                          fontSize: 12,
+                          color: scheme.onSurface.withOpacity(0.6))),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
 
 class _SectionTitle extends StatelessWidget {
   final IconData icon;

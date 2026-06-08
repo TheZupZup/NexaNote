@@ -22,8 +22,9 @@ server, and the data.
 - **WebDAV sync** — sync notes between devices through your own WebDAV server.
 - **Docker deployment** — a single multi-arch image for `amd64` and `arm64`.
 - **Android APK** — installable builds published via GitHub Releases.
-- **Offline-first direction** — the app is built to keep working without a
-  network connection and sync when one is available.
+- **Local-first / offline** — install and use the app with no backend at all;
+  notes are saved on-device in local SQLite. Connecting a server for WebDAV
+  sync is entirely optional.
 
 ---
 
@@ -97,9 +98,16 @@ any other important folder.
 
 ---
 
-## Connecting the app
+## Connecting the app (optional)
 
-Open **Settings → Backend** in the app and enter your backend URL.
+NexaNote is **local-first**: on first launch you can tap **"Use NexaNote
+offline"** and start taking notes immediately. Notes are stored on the device
+in a local SQLite database — no backend, NAS, or Docker required. You only need
+the steps below if you want to **sync** across devices.
+
+When you're ready to sync, open **Settings → Backend API** in the app and enter
+your backend URL. Until then the app stays fully usable and the sync button
+simply explains that sync needs a backend.
 
 **Backend (REST API) URL:**
 

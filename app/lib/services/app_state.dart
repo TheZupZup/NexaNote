@@ -27,6 +27,21 @@ const String kPrefsWebdavUrlOverride = 'webdav_url_override';
 /// mobile does not bounce a configured user back to ConnectScreen.
 const String kPrefsHasEverConnected = 'has_ever_connected';
 
+/// SharedPreferences key remembering that the user chose to run NexaNote
+/// without a backend ("local mode"). This is deliberately distinct from a
+/// transient backend-unavailable state: local mode means *no backend is
+/// configured*, so the app uses on-device SQLite as the source of truth,
+/// never surfaces a scary "backend unavailable" banner, and treats sync as a
+/// friendly no-op until the user connects a server. Cleared automatically the
+/// first time a connection succeeds.
+const String kPrefsLocalMode = 'local_mode';
+
+/// Message shown when the user triggers sync while no backend is configured.
+/// WebDAV/NAS sync is mediated by the backend, so there is nothing to sync
+/// against in local mode — we say so plainly instead of surfacing an error.
+const String kLocalModeSyncMessage =
+    'Configure sync in Settings to use WebDAV/NAS sync.';
+
 class AppState extends ChangeNotifier {
   final LocalNoteService _localService;
   final ApiClientFactory _clientFactory;
@@ -36,6 +51,7 @@ class AppState extends ChangeNotifier {
   bool _isConnected = false;
   bool _isBackendAvailable = false;
   bool _hasEverConnected = false;
+  bool _localMode = false;
   String? _backendErrorMessage;
   String? _lastConnectError;
   bool _hasLocalData = false;
@@ -74,6 +90,26 @@ class AppState extends ChangeNotifier {
   /// failures — bouncing a configured user back to ConnectScreen on every
   /// transient mobile-network blip would force them to retype their URL.
   bool get hasEverConnected => _hasEverConnected;
+
+  /// True when the user is running NexaNote without a backend — either they
+  /// chose "Use offline" at first launch or have not configured a server yet.
+  /// In this mode CRUD goes straight to the local SQLite store and sync is a
+  /// friendly no-op. Cleared as soon as [connect] reaches a backend.
+  bool get localMode => _localMode;
+
+  /// True when a backend has been configured (i.e. the app is not in local
+  /// mode). Lets Settings and the UI distinguish "backend not configured"
+  /// (local mode) from "backend configured but currently unavailable".
+  bool get isBackendConfigured => !_localMode;
+
+  /// Whether the first-launch onboarding screen should be shown. A fresh
+  /// install — no backend ever reached, no explicit local-mode choice, and no
+  /// local data — lands here; everyone else goes straight to HomeScreen. The
+  /// `hasEverConnected` / `hasLocalData` terms preserve the existing
+  /// escape hatches so users upgrading from older builds are never bounced
+  /// back through onboarding.
+  bool get needsOnboarding =>
+      !_hasEverConnected && !_localMode && !_hasLocalData;
   String? get backendErrorMessage => _backendErrorMessage;
   String? get lastConnectError => _lastConnectError;
   bool get hasLocalData => _hasLocalData;
@@ -101,6 +137,19 @@ class AppState extends ChangeNotifier {
     _webdavUrlOverride =
         (override == null || override.trim().isEmpty) ? null : override;
     _hasEverConnected = prefs.getBool(kPrefsHasEverConnected) ?? false;
+    _localMode = prefs.getBool(kPrefsLocalMode) ?? false;
+
+    if (_localMode) {
+      // No backend configured — skip the ping (it would only manufacture a
+      // scary "backend unavailable" state for a user who deliberately chose
+      // offline). Load the on-device store and open straight into HomeScreen.
+      _isBackendAvailable = false;
+      _backendErrorMessage = null;
+      await _loadLocalFallback();
+      notifyListeners();
+      return;
+    }
+
     await connect();
   }
 
@@ -120,6 +169,66 @@ class AppState extends ChangeNotifier {
 
   /// Opens the local SQLite database. Safe to call from tests directly.
   Future<void> initLocal() => _localService.initialize();
+
+  /// Ensures the local store is open before a local-mode CRUD call. Cheap and
+  /// idempotent — [LocalNoteService.initialize] returns early once opened.
+  Future<void> _ensureLocalReady() async {
+    if (!_localService.isInitialized) await _localService.initialize();
+  }
+
+  /// Enters local-only mode from the first-launch screen: the user opts to use
+  /// NexaNote without a backend. Persists the choice, opens the local store,
+  /// loads any existing on-device notes, and clears the backend-unavailable
+  /// banner (this is a deliberate choice, not an error). The router then shows
+  /// HomeScreen.
+  Future<void> enableLocalMode() async {
+    _localMode = true;
+    _isBackendAvailable = false;
+    _backendErrorMessage = null;
+    _isLoading = false;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(kPrefsLocalMode, true);
+    } catch (_) {
+      // A failed prefs write is non-fatal; the in-memory flag still keeps the
+      // current session local-first.
+    }
+    await _ensureLocalReady();
+    await _loadLocalFallback();
+    notifyListeners();
+  }
+
+  /// A successful connection means a backend is now configured: leave local
+  /// mode so CRUD and sync use the backend again. Persisted so a later cold
+  /// start does not silently fall back into local-only behaviour.
+  Future<void> _clearLocalMode() async {
+    if (!_localMode) return;
+    _localMode = false;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(kPrefsLocalMode, false);
+    } catch (_) {
+      // Non-fatal; the in-memory flag is already cleared for this session.
+    }
+  }
+
+  /// Best-effort upload of notes the user created while offline, run once when
+  /// they leave local mode by connecting a backend. Reuses the existing
+  /// [SyncService] push so the storage/sync layout is unchanged. Failures are
+  /// swallowed: a connection must never be blocked by a migration hiccup — the
+  /// notes stay in the local store and can be synced again later.
+  Future<void> _migrateLocalNotesToBackend() async {
+    try {
+      final snapshot = await _localService.exportAllData();
+      final hasLocal = snapshot.notebooks.isNotEmpty ||
+          snapshot.notes.any((n) => !n.isDeleted);
+      if (!hasLocal) return;
+      final svc = SyncService(apiClient: client, local: _localService);
+      await svc.pushLocal();
+    } catch (_) {
+      // Intentionally ignored — see doc comment.
+    }
+  }
 
   Future<void> connect({String? url}) async {
     if (url != null) {
@@ -144,8 +253,17 @@ class AppState extends ChangeNotifier {
     _isBackendAvailable = _isConnected;
     if (_isConnected) {
       _backendErrorMessage = null;
+      // A reachable backend means one is now configured — drop out of local
+      // mode so CRUD and sync use the backend again.
+      final wasLocalMode = _localMode;
+      await _clearLocalMode();
       await _markEverConnected();
       try {
+        if (wasLocalMode) {
+          // The user took notes offline before configuring a server — upload
+          // them so nothing created in local mode is lost on the switch.
+          await _migrateLocalNotesToBackend();
+        }
         await loadNotebooks();
         await loadNotes();
       } catch (e) {
@@ -213,6 +331,33 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  /// Reloads [_notebooks] from the local SQLite store. Used by the local-mode
+  /// CRUD paths so the UI reflects on-device data.
+  Future<void> _refreshLocalNotebooks() async {
+    await _ensureLocalReady();
+    final nbs = await _localService.getNotebooks();
+    _notebooks = nbs.map(_toApiNotebook).toList();
+    _hasLocalData = _notebooks.isNotEmpty || _notes.isNotEmpty;
+  }
+
+  /// Reloads [_notes] from the local SQLite store, applying the same
+  /// notebook/search filters the backend would. Used by the local-mode CRUD
+  /// paths so list views stay in sync with on-device data.
+  Future<void> _refreshLocalNotes({String? notebookId, String? search}) async {
+    await _ensureLocalReady();
+    final snapshot = await _localService.exportAllData();
+    Iterable<local.Note> notes = snapshot.notes.where((n) => !n.isDeleted);
+    if (notebookId != null) {
+      notes = notes.where((n) => n.notebookId == notebookId);
+    }
+    final query = search?.trim().toLowerCase();
+    if (query != null && query.isNotEmpty) {
+      notes = notes.where((n) => n.title.toLowerCase().contains(query));
+    }
+    _notes = notes.map(_toApiNote).toList();
+    _hasLocalData = _notebooks.isNotEmpty || _notes.isNotEmpty;
+  }
+
   api.Notebook _toApiNotebook(local.Notebook n) => api.Notebook(
         id: n.id,
         name: n.name,
@@ -234,7 +379,36 @@ class AppState extends ChangeNotifier {
         createdAt: n.createdAt.toIso8601String(),
       );
 
+  /// Like [_toApiNote] but carries the locally-stored typed content as a
+  /// single page, matching the shape the editor expects from
+  /// `client.getNote`. Lets the editor open notes offline.
+  api.Note _toApiNoteWithContent(local.Note n) => api.Note(
+        id: n.id,
+        title: n.title,
+        noteType: n.noteType,
+        notebookId: n.notebookId,
+        tags: n.tags,
+        isPinned: n.isPinned,
+        isDeleted: n.isDeleted,
+        pageCount: 1,
+        updatedAt: n.updatedAt.toIso8601String(),
+        createdAt: n.createdAt.toIso8601String(),
+        pages: [
+          api.NotePage(
+            pageNumber: 1,
+            template: 'blank',
+            typedContent: n.typedContent,
+            strokes: const [],
+          ),
+        ],
+      );
+
   Future<void> loadNotebooks() async {
+    if (_localMode) {
+      await _refreshLocalNotebooks();
+      notifyListeners();
+      return;
+    }
     try {
       _notebooks = await client.getNotebooks();
       _markBackendAvailable();
@@ -246,6 +420,15 @@ class AppState extends ChangeNotifier {
   }
 
   Future<api.Notebook> createNotebook(String name, String color) async {
+    if (_localMode) {
+      await _ensureLocalReady();
+      final nb = await _localService.createNotebook(name, color: color);
+      final apiNb = _toApiNotebook(nb);
+      _notebooks.insert(0, apiNb);
+      _hasLocalData = true;
+      notifyListeners();
+      return apiNb;
+    }
     try {
       final nb = await client.createNotebook(name: name, color: color);
       _notebooks.insert(0, nb);
@@ -259,6 +442,14 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> deleteNotebook(String id) async {
+    if (_localMode) {
+      await _ensureLocalReady();
+      await _localService.hardDeleteNotebook(id);
+      _notebooks.removeWhere((n) => n.id == id);
+      if (_selectedNotebook?.id == id) { _selectedNotebook = null; _notes = []; }
+      notifyListeners();
+      return;
+    }
     try {
       await client.deleteNotebook(id);
       _notebooks.removeWhere((n) => n.id == id);
@@ -280,6 +471,12 @@ class AppState extends ChangeNotifier {
   Future<void> loadNotes({String? notebookId, String? search}) async {
     _isLoading = true;
     notifyListeners();
+    if (_localMode) {
+      await _refreshLocalNotes(notebookId: notebookId, search: search);
+      _isLoading = false;
+      notifyListeners();
+      return;
+    }
     try {
       _notes = await client.getNotes(notebookId: notebookId, search: search);
       _markBackendAvailable();
@@ -291,6 +488,19 @@ class AppState extends ChangeNotifier {
   }
 
   Future<api.Note> createNote({required String title, required String noteType, String template = 'blank'}) async {
+    if (_localMode) {
+      await _ensureLocalReady();
+      final note = await _localService.createNote(
+        title,
+        notebookId: _selectedNotebook?.id,
+        noteType: noteType,
+      );
+      final apiNote = _toApiNote(note);
+      _notes.insert(0, apiNote);
+      _hasLocalData = true;
+      notifyListeners();
+      return apiNote;
+    }
     try {
       final note = await client.createNote(
         title: title, noteType: noteType,
@@ -305,7 +515,31 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  /// Fetches a single note with its page content, honouring the current mode:
+  /// from the backend when connected, or from the local SQLite store in local
+  /// mode. Screens call this instead of `client.getNote` directly so the
+  /// editor opens offline.
+  Future<api.Note> getNote(String id) async {
+    if (_localMode) {
+      await _ensureLocalReady();
+      final n = await _localService.getNoteById(id);
+      if (n == null) {
+        throw StateError('Note not found in local store: $id');
+      }
+      return _toApiNoteWithContent(n);
+    }
+    return client.getNote(id);
+  }
+
   Future<void> deleteNote(String id) async {
+    if (_localMode) {
+      await _ensureLocalReady();
+      await _localService.deleteNote(id);
+      _notes.removeWhere((n) => n.id == id);
+      if (_selectedNote?.id == id) _selectedNote = null;
+      notifyListeners();
+      return;
+    }
     try {
       await client.deleteNote(id);
       _notes.removeWhere((n) => n.id == id);
@@ -319,6 +553,19 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> updateNoteTitle(String id, String title) async {
+    if (_localMode) {
+      await _ensureLocalReady();
+      final n = await _localService.getNoteById(id);
+      if (n != null) {
+        await _localService.upsertNote(n.copyWith(
+          title: title,
+          syncStatus: n.syncStatus == 'synced' ? 'modified' : n.syncStatus,
+          updatedAt: DateTime.now().toUtc(),
+        ));
+      }
+      await loadNotes(notebookId: _selectedNotebook?.id);
+      return;
+    }
     try {
       await client.updateNote(id, title: title);
       _markBackendAvailable();
@@ -330,6 +577,18 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> savePageText(String noteId, int pageNum, String content) async {
+    if (_localMode) {
+      await _ensureLocalReady();
+      final n = await _localService.getNoteById(noteId);
+      if (n != null) {
+        await _localService.upsertNote(n.copyWith(
+          typedContent: content,
+          syncStatus: n.syncStatus == 'synced' ? 'modified' : n.syncStatus,
+          updatedAt: DateTime.now().toUtc(),
+        ));
+      }
+      return;
+    }
     try {
       await client.savePageText(noteId, pageNum, content);
       if (_markBackendAvailable()) notifyListeners();
@@ -342,6 +601,13 @@ class AppState extends ChangeNotifier {
   void selectNote(api.Note? note) { _selectedNote = note; notifyListeners(); }
 
   Future<String> triggerSync() async {
+    if (_localMode) {
+      // No backend configured — sync is a friendly no-op, not an error.
+      _syncError = null;
+      _syncMessage = kLocalModeSyncMessage;
+      notifyListeners();
+      return kLocalModeSyncMessage;
+    }
     _beginSync();
     try {
       final result = await client.triggerSync();
@@ -361,6 +627,18 @@ class AppState extends ChangeNotifier {
   /// whatever the backend returns. Optional [service] override exists for
   /// tests; production callers leave it null.
   Future<SyncResult> syncNow({SyncService? service}) async {
+    if (_localMode) {
+      // No backend configured — auto-sync and manual sync are friendly no-ops.
+      _syncError = null;
+      _syncMessage = kLocalModeSyncMessage;
+      notifyListeners();
+      return const SyncResult(
+        notebooksPushed: 0,
+        notesPushed: 0,
+        notebooksPulled: 0,
+        notesPulled: 0,
+      );
+    }
     _beginSync();
     try {
       await initLocal();
