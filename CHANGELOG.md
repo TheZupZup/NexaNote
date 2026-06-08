@@ -12,6 +12,12 @@ _Nothing yet._
 
 ---
 
+## v1.1.1
+
+_Nothing yet._
+
+---
+
 ## v1.1.0 — Sync reliability & diagnostics
 
 ### New
