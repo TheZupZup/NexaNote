@@ -37,7 +37,10 @@ jobs:
           echo "Tag versionName:     ${tag_version}"
           echo "pubspec versionName: ${pubspec_version}"
           if [ "${tag_version}" != "${pubspec_version}" ]; then
-            echo "::error::Release tag v${tag_version} does not match pubspec.yaml versionName ${pubspec_version}. Bump app/pubspec.yaml before tagging."
+            echo "::error::Release tag/pubspec version mismatch — refusing to publish."
+            echo "  current tag version:     v${tag_version} (the tag you pushed)"
+            echo "  current pubspec version: ${pubspec_version} (app/pubspec.yaml)"
+            echo "Expected next action: tag the commit on main where app/pubspec.yaml already reads ${tag_version}, or run the Prepare release workflow to bump app/pubspec.yaml to ${tag_version} first, then re-create tag v${tag_version}."
             exit 1
           fi
 

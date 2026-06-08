@@ -224,47 +224,50 @@ Release title, the APK asset, the Docker image tags, and the F-Droid metadata
 all follow that one tag — there is no version string hardcoded in more than one
 place.
 
-To cut a release (maintainers):
+To cut a release (maintainers) — **entirely from the GitHub web UI, no local
+checkout required**:
 
-1. **Bump the version.** Choose the next `versionName` (semver `X.Y.Z`) and a
-   higher `versionCode` (a monotonically increasing integer):
+1. **Run the Prepare release workflow.** From the repo's
+   **Actions → Prepare release → Run workflow**, enter the next `version_name`
+   (semver `X.Y.Z`) and a higher `version_code` (a monotonically increasing
+   integer). The workflow bumps `app/pubspec.yaml` to `X.Y.Z+versionCode`, adds
+   the matching F-Droid build entry in `metadata/com.nexanote.app.yml` (with
+   `commit: vX.Y.Z`), and rolls the `## Unreleased` section of `CHANGELOG.md`
+   into a `## vX.Y.Z` entry — all on a `release/vX.Y.Z` branch — then opens (or
+   updates) a pull request into `main`. It **never** pushes to the protected
+   `main` branch and **never** creates the tag itself.
 
-   ```bash
-   python scripts/bump_version.py 1.0.2 3
-   ```
+   - The run is **safe to retry**: it is idempotent on the `release/vX.Y.Z`
+     branch and reuses the same PR. It stops early with a clear message only if
+     the tag `vX.Y.Z` already exists.
+   - Tick **dry run** to validate the version/tag/branch state without
+     committing or pushing anything.
+   - If your repository blocks Actions from opening PRs, the run still pushes
+     the branch and prints a **manual PR URL**
+     (`…/compare/main...release/vX.Y.Z`) in the job summary.
 
-   This rewrites `app/pubspec.yaml` to `1.0.2+3`, adds the matching F-Droid
-   build entry in `metadata/com.nexanote.app.yml` (with `commit: v1.0.2`), and
-   rolls the `## Unreleased` section of `CHANGELOG.md` into a `## v1.0.2` entry.
-   It does **not** create a git tag.
+2. **Merge the release PR.** Reviewing and merging the PR is what lands the
+   version bump on `main`.
 
-2. **Commit** the bump:
+3. **Create the GitHub Release / tag `vX.Y.Z` from `main`.** Use
+   **Releases → Draft a new release**, choose tag `vX.Y.Z` targeting `main`, and
+   publish. The tag must match the `pubspec.yaml` versionName that the merged PR
+   set.
 
-   ```bash
-   git commit -am "release: NexaNote v1.0.2"
-   ```
-
-3. **Tag** the release `vX.Y.Z` (the tag must match the `pubspec.yaml`
-   versionName):
-
-   ```bash
-   git tag v1.0.2
-   ```
-
-4. **Push** the commit and the tag:
-
-   ```bash
-   git push && git push origin v1.0.2
-   ```
-
-5. **GitHub Actions publishes** the artifacts. The Docker workflow pushes
-   `thezupzup/nexanote:1.0.2` and `thezupzup/nexanote:latest`; the Android
-   workflow builds the release APK, titles the GitHub Release
-   **NexaNote v1.0.2**, and attaches the stable-named `NexaNote-Android.apk`
+4. **GitHub Actions publishes** the artifacts automatically. The Docker workflow
+   pushes `thezupzup/nexanote:X.Y.Z` and `thezupzup/nexanote:latest`; the
+   Android workflow builds the release APK, titles the GitHub Release
+   **NexaNote vX.Y.Z**, and attaches the stable-named `NexaNote-Android.apk`
    asset that Obtainium tracks.
 
-Both workflows fail fast if the tag and the `pubspec.yaml` version disagree, so
-the published version always matches the tag you pushed.
+Both publish workflows fail fast (with a message naming the current tag version,
+the current pubspec version, and the next action) if the tag and the
+`pubspec.yaml` version disagree, so the published version always matches the tag
+you created.
+
+> **Local alternative.** `scripts/bump_version.py X.Y.Z <code>` performs the
+> same bump on your machine if you prefer to commit and tag manually; it does
+> not create a git tag unless you pass `--tag`.
 
 ---
 
