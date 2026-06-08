@@ -8,7 +8,9 @@ name: Prepare release
 #   3. commits the bump as `chore: release vX.Y.Z` on a new `release/vX.Y.Z`
 #      branch (github-actions[bot] author),
 #   4. pushes that release branch, and
-#   5. opens a pull request into main titled `chore: release vX.Y.Z`.
+#   5. opens a pull request into main titled `chore: release vX.Y.Z` (or, if the
+#      repository blocks Actions from creating PRs, prints a link to open it by
+#      hand instead of failing the run — the branch is already pushed).
 #
 # It NEVER pushes to main directly — main is a protected branch, so the bump
 # lands only when a maintainer merges the PR. It also no longer creates the
@@ -192,6 +194,10 @@ jobs:
 
           title="chore: release ${TAG}"
 
+          # Compare view a maintainer can open the PR from by hand if this
+          # workflow isn't allowed to create one.
+          compare_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/compare/main...${RELEASE_BRANCH}"
+
           # On a re-run the branch is force-pushed above; update the existing PR
           # instead of failing on "a pull request already exists".
           existing="$(gh pr list --head "${RELEASE_BRANCH}" --base main --state open --json number --jq '.[0].number // empty')"
@@ -199,6 +205,23 @@ jobs:
             gh pr edit "${existing}" --title "${title}" --body-file pr-body.md
             echo "Updated existing release PR #${existing} for ${RELEASE_BRANCH}."
           else
-            gh pr create --base main --head "${RELEASE_BRANCH}" --title "${title}" --body-file pr-body.md
-            echo "Opened release PR for ${RELEASE_BRANCH}."
+            # Some repositories disable "Allow GitHub Actions to create and
+            # approve pull requests". With the default GITHUB_TOKEN, `gh pr
+            # create` then fails with a specific GitHub message. The release
+            # branch is already pushed at this point, so downgrade *that* failure
+            # to a warning and tell the maintainer how to open the PR by hand.
+            # Any other failure (and the RELEASE_PAT path) still fails the job.
+            if create_output="$(gh pr create --base main --head "${RELEASE_BRANCH}" --title "${title}" --body-file pr-body.md 2>&1)"; then
+              echo "${create_output}"
+              echo "Opened release PR for ${RELEASE_BRANCH}."
+            elif grep -qi "not permitted to create or approve pull requests" <<<"${create_output}"; then
+              echo "${create_output}" >&2
+              echo "::warning::GitHub Actions is not permitted to create pull requests in this repository; pushed the release branch without opening a PR."
+              printf 'Release branch created successfully:\n%s\n\nOpen a PR manually:\n%s\n' \
+                "${RELEASE_BRANCH}" "${compare_url}"
+            else
+              echo "${create_output}" >&2
+              echo "::error::Failed to open the release pull request for ${RELEASE_BRANCH}."
+              exit 1
+            fi
           fi
