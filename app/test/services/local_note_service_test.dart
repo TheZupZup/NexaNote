@@ -119,5 +119,30 @@ void main() {
       final note = await service.createNote('Blank');
       expect(await service.getStrokesForNote(note.id), isEmpty);
     });
+
+    test('replaceStrokesForNote swaps the whole set and drops old points',
+        () async {
+      final note = await service.createNote('Ink');
+      Stroke mk(String id, double x) => Stroke(
+            id: id,
+            noteId: note.id,
+            createdAt: DateTime.utc(2024, 1, 1),
+            points: [StrokePoint(x: x, y: 0), StrokePoint(x: x + 1, y: 1)],
+          );
+
+      await service.replaceStrokesForNote(note.id, [mk('s1', 0), mk('s2', 10)]);
+      expect(await service.getStrokesForNote(note.id), hasLength(2));
+
+      // Replacing with a single stroke removes the others entirely.
+      await service.replaceStrokesForNote(note.id, [mk('s3', 20)]);
+      final after = await service.getStrokesForNote(note.id);
+      expect(after, hasLength(1));
+      expect(after.first.id, 's3');
+      expect(after.first.points, hasLength(2));
+
+      // Clearing the drawing removes all strokes (and their points).
+      await service.replaceStrokesForNote(note.id, const []);
+      expect(await service.getStrokesForNote(note.id), isEmpty);
+    });
   });
 }

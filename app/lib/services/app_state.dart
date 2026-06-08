@@ -9,6 +9,8 @@ import 'server_url.dart';
 import 'sync_service.dart';
 import '../data/models/note.dart' as local;
 import '../data/models/notebook.dart' as local;
+import '../data/models/stroke.dart';
+import '../data/models/point.dart';
 
 typedef ApiClientFactory = api.ApiClient Function(String baseUrl);
 
@@ -379,10 +381,15 @@ class AppState extends ChangeNotifier {
         createdAt: n.createdAt.toIso8601String(),
       );
 
-  /// Like [_toApiNote] but carries the locally-stored typed content as a
-  /// single page, matching the shape the editor expects from
-  /// `client.getNote`. Lets the editor open notes offline.
-  api.Note _toApiNoteWithContent(local.Note n) => api.Note(
+  /// Like [_toApiNote] but carries the locally-stored typed content and any
+  /// saved ink [strokes] as a single page, matching the shape the editor
+  /// expects from `client.getNote`. Lets the editor open notes — text *and*
+  /// drawings — offline.
+  api.Note _toApiNoteWithContent(
+    local.Note n, {
+    List<Stroke> strokes = const [],
+  }) =>
+      api.Note(
         id: n.id,
         title: n.title,
         noteType: n.noteType,
@@ -398,7 +405,7 @@ class AppState extends ChangeNotifier {
             pageNumber: 1,
             template: 'blank',
             typedContent: n.typedContent,
-            strokes: const [],
+            strokes: strokes.map(inkJsonFromStroke).toList(),
           ),
         ],
       );
@@ -526,7 +533,8 @@ class AppState extends ChangeNotifier {
       if (n == null) {
         throw StateError('Note not found in local store: $id');
       }
-      return _toApiNoteWithContent(n);
+      final strokes = await _localService.getStrokesForNote(id);
+      return _toApiNoteWithContent(n, strokes: strokes);
     }
     return client.getNote(id);
   }
@@ -591,6 +599,54 @@ class AppState extends ChangeNotifier {
     }
     try {
       await client.savePageText(noteId, pageNum, content);
+      if (_markBackendAvailable()) notifyListeners();
+    } catch (e) {
+      await _handleBackendFailure(e);
+      rethrow;
+    }
+  }
+
+  /// Persists a page's ink [strokes], honouring the current mode. In local mode
+  /// the drawing is written to the on-device SQLite store (replacing the note's
+  /// previous strokes) and the note is flagged for later sync; with a backend
+  /// configured it goes through the existing API. Throws on failure so the
+  /// editor can surface a friendly error rather than silently dropping a
+  /// drawing.
+  ///
+  /// [strokes] is the editor's wire shape (`{id,color,width,tool,points:[…]}`),
+  /// the same payload the backend already accepts.
+  Future<void> savePageInk(
+    String noteId,
+    int pageNum,
+    List<Map<String, dynamic>> strokes,
+  ) async {
+    if (_localMode) {
+      await _ensureLocalReady();
+      // A single created-at instant per save, nudged forward per stroke so the
+      // load order matches the draw order (getStrokesForNote sorts by it).
+      final base = DateTime.now().toUtc();
+      final localStrokes = <Stroke>[
+        for (var i = 0; i < strokes.length; i++)
+          strokeFromInkJson(
+            noteId,
+            strokes[i],
+            base.add(Duration(milliseconds: i)),
+          ),
+      ];
+      await _localService.replaceStrokesForNote(noteId, localStrokes);
+      // Mark the note modified so a future sync uploads the drawing. The
+      // note's content/type is untouched — only the sync bookkeeping changes.
+      final n = await _localService.getNoteById(noteId);
+      if (n != null) {
+        await _localService.upsertNote(n.copyWith(
+          syncStatus: n.syncStatus == 'synced' ? 'modified' : n.syncStatus,
+          updatedAt: DateTime.now().toUtc(),
+        ));
+      }
+      return;
+    }
+    try {
+      await client.savePageInk(noteId, pageNum, strokes);
       if (_markBackendAvailable()) notifyListeners();
     } catch (e) {
       await _handleBackendFailure(e);
@@ -696,3 +752,53 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 }
+
+/// Converts an editor/wire ink stroke (`{id,color,width,tool,points:[…]}`) into
+/// the local [Stroke] model for SQLite persistence. The editor emits point
+/// timestamps under `ts`; the local model stores them as `timestampMs`.
+/// Tolerant of missing fields so a malformed stroke degrades gracefully rather
+/// than throwing and losing the whole drawing.
+Stroke strokeFromInkJson(
+  String noteId,
+  Map<String, dynamic> json,
+  DateTime createdAt,
+) {
+  final rawPoints = (json['points'] as List?) ?? const [];
+  return Stroke(
+    id: (json['id'] as String?) ??
+        DateTime.now().microsecondsSinceEpoch.toString(),
+    noteId: noteId,
+    color: (json['color'] as String?) ?? '#000000',
+    width: (json['width'] as num?)?.toDouble() ?? 2.0,
+    tool: (json['tool'] as String?) ?? 'pen',
+    createdAt: createdAt,
+    points: [
+      for (final p in rawPoints)
+        if (p is Map)
+          StrokePoint(
+            x: (p['x'] as num?)?.toDouble() ?? 0,
+            y: (p['y'] as num?)?.toDouble() ?? 0,
+            pressure: (p['pressure'] as num?)?.toDouble() ?? 0.5,
+            timestampMs: (p['ts'] as num?)?.toInt() ?? 0,
+          ),
+    ],
+  );
+}
+
+/// Inverse of [strokeFromInkJson]: renders a local [Stroke] back into the
+/// editor/wire shape so the ink canvas can replay a saved drawing.
+Map<String, dynamic> inkJsonFromStroke(Stroke stroke) => {
+      'id': stroke.id,
+      'color': stroke.color,
+      'width': stroke.width,
+      'tool': stroke.tool,
+      'points': [
+        for (final p in stroke.points)
+          {
+            'x': p.x,
+            'y': p.y,
+            'pressure': p.pressure,
+            'ts': p.timestampMs,
+          },
+      ],
+    };

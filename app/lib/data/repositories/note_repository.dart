@@ -211,6 +211,51 @@ class NoteRepository {
     }
   }
 
+  /// Replaces the entire stroke set for [noteId] in a single transaction.
+  ///
+  /// The ink editor hands us the full list of completed strokes every time one
+  /// finishes, so the simplest correct persistence is to swap the note's
+  /// strokes wholesale: delete the old strokes (and their points) and insert
+  /// the new ones. Running inside a transaction means a mid-write failure never
+  /// leaves the note with a half-saved drawing. Stroke order is preserved by
+  /// the caller assigning monotonically increasing `created_at` values, which
+  /// [getStrokesForNote] orders by.
+  Future<void> replaceStrokesForNote(
+    String noteId,
+    List<Stroke> strokes,
+  ) async {
+    await _db.transaction((txn) async {
+      final existing = await txn.query(
+        'strokes',
+        columns: ['id'],
+        where: 'note_id = ?',
+        whereArgs: [noteId],
+      );
+      for (final row in existing) {
+        await txn.delete(
+          'stroke_points',
+          where: 'stroke_id = ?',
+          whereArgs: [row['id']],
+        );
+      }
+      await txn.delete('strokes', where: 'note_id = ?', whereArgs: [noteId]);
+
+      for (final stroke in strokes) {
+        await txn.insert(
+          'strokes',
+          stroke.toMap(),
+          conflictAlgorithm: ConflictAlgorithm.replace,
+        );
+        for (var i = 0; i < stroke.points.length; i++) {
+          await txn.insert(
+            'stroke_points',
+            stroke.points[i].toMap(stroke.id, i),
+          );
+        }
+      }
+    });
+  }
+
   /// Returns all strokes for [noteId] with their points, ordered by creation.
   Future<List<Stroke>> getStrokesForNote(String noteId) async {
     final strokeRows = await _db.query(

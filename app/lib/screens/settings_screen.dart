@@ -270,9 +270,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
         ],
       ),
-      body: ListView(
-        padding: const EdgeInsets.all(16),
-        children: [
+      // SafeArea(bottom) keeps the last card clear of the gesture/navigation
+      // bar; the AppBar already handles the top inset. The generous bottom
+      // padding gives the final card breathing room above the system bar.
+      body: SafeArea(
+        top: false,
+        child: ListView(
+          padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
+          children: [
 
           // ── Mode (local vs backend) ────────────────────────────
           _ModeCard(localMode: localMode),
@@ -513,6 +518,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
                             color: Theme.of(context).colorScheme.onSurface.withOpacity(0.6),
                             fontFamily: 'monospace',
                           ),
+                          // Wrap long paths onto a second line (then ellipsize)
+                          // so they stay readable instead of being cut mid-word.
+                          maxLines: 2,
+                          softWrap: true,
                           overflow: TextOverflow.ellipsis,
                         ),
                       ),
@@ -689,7 +698,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
 
           const SizedBox(height: 32),
-        ],
+          ],
+        ),
       ),
     );
   }

@@ -53,6 +53,36 @@ jobs:
           channel: stable
           cache: true
 
+      # Configure stable release signing from repository secrets so every
+      # GitHub Release APK is signed with the same key and therefore installs
+      # *over* the previous release (no uninstall/reinstall, app data preserved).
+      # If the secrets are not set, the build falls back to the debug key — the
+      # APK still builds, but updates over a prior release are not guaranteed.
+      # Secrets: ANDROID_KEYSTORE_BASE64 (base64 of the .jks), ANDROID_KEY_ALIAS,
+      # ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_PASSWORD. See docs/ANDROID_SIGNING.md.
+      - name: Configure release signing
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${ANDROID_KEYSTORE_BASE64:-}" ]; then
+            echo "::warning::ANDROID_KEYSTORE_BASE64 secret not set — release APK will be DEBUG-signed."
+            echo "::warning::Debug-signed APKs are not guaranteed to install over previous releases."
+            exit 0
+          fi
+          keystore="${GITHUB_WORKSPACE}/app/android/app/nexanote-upload.jks"
+          echo "${ANDROID_KEYSTORE_BASE64}" | base64 -d > "${keystore}"
+          cat > "${GITHUB_WORKSPACE}/app/android/key.properties" <<EOF
+          storeFile=${keystore}
+          storePassword=${ANDROID_KEYSTORE_PASSWORD}
+          keyAlias=${ANDROID_KEY_ALIAS}
+          keyPassword=${ANDROID_KEY_PASSWORD}
+          EOF
+          echo "Release signing configured."
+
       - name: Install dependencies
         run: |
           cd app
