@@ -31,7 +31,10 @@ class _DesktopLayout extends StatelessWidget {
 
     return Scaffold(
       body: Column(children: [
-        if (!state.isBackendAvailable)
+        // Only when a *configured* backend is unreachable — never in local
+        // mode, where running without a backend is the user's choice, not an
+        // error.
+        if (!state.isBackendAvailable && !state.localMode)
           _OfflineBanner(message: state.backendErrorMessage),
         Expanded(child: Row(children: [
         SizedBox(width: 240, child: NotebookSidebar(
@@ -57,7 +60,7 @@ class _DesktopLayout extends StatelessWidget {
             selected: state.selectedNote,
             isLoading: state.isLoading,
             onSelect: (note) async {
-              final full = await state.client.getNote(note.id);
+              final full = await state.getNote(note.id);
               state.selectNote(full);
             },
             onDelete: (note) => state.deleteNote(note.id),
@@ -82,7 +85,7 @@ class _DesktopLayout extends StatelessWidget {
   Future<void> _createNote(BuildContext context) async {
     final state = context.read<AppState>();
     final note = await state.createNote(title: 'Untitled', noteType: 'typed');
-    final full = await state.client.getNote(note.id);
+    final full = await state.getNote(note.id);
     state.selectNote(full);
   }
 
@@ -134,14 +137,14 @@ class _MobileLayout extends StatelessWidget {
         ],
       ),
       body: Column(children: [
-        if (!state.isBackendAvailable)
+        if (!state.isBackendAvailable && !state.localMode)
           _OfflineBanner(message: state.backendErrorMessage),
         Expanded(child: NotesList(
           notes: state.notes,
           selected: state.selectedNote,
           isLoading: state.isLoading,
           onSelect: (note) async {
-            final full = await state.client.getNote(note.id);
+            final full = await state.getNote(note.id);
             state.selectNote(full);
             if (context.mounted) {
               Navigator.push(context, MaterialPageRoute(
@@ -175,7 +178,7 @@ class _MobileLayout extends StatelessWidget {
         foregroundColor: Colors.white,
         onPressed: () async {
           final note = await state.createNote(title: 'Untitled', noteType: 'typed');
-          final full = await state.client.getNote(note.id);
+          final full = await state.getNote(note.id);
           state.selectNote(full);
           if (context.mounted) {
             Navigator.push(context, MaterialPageRoute(

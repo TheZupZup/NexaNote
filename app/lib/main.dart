@@ -31,17 +31,14 @@ class NexaNoteApp extends StatelessWidget {
           if (state.isLoading) {
             return const _SplashScreen();
           }
-          // ConnectScreen is reserved for first-launch setup. Once the user
-          // has successfully reached a backend (`hasEverConnected`) or has
-          // local data to fall back on, stay on HomeScreen — a transient API
-          // failure on mobile must not bounce a configured user back through
-          // the connect flow and force them to retype their server URL. The
-          // offline banner inside HomeScreen surfaces backend-unavailable
-          // state without losing the session.
-          final shouldShowConnect = !state.hasEverConnected &&
-              !state.isBackendAvailable &&
-              !state.hasLocalData;
-          if (shouldShowConnect) {
+          // First launch only: offer "Use offline" or "Connect to a server".
+          // NexaNote is local-first, so we never force the connect flow on a
+          // user who has chosen local mode, has ever reached a backend, or has
+          // local data to fall back on — a transient API failure must not
+          // bounce a configured user back through onboarding and make them
+          // retype their server URL. The offline banner inside HomeScreen
+          // surfaces backend-unavailable state without losing the session.
+          if (state.needsOnboarding) {
             return const ConnectScreen();
           }
           return const HomeScreen();
