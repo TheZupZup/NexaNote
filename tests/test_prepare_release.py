@@ -22,6 +22,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "prepare-release.yml"
 ANDROID_WORKFLOW = ROOT / ".github" / "workflows" / "android-release.yml"
+PREFLIGHT = ROOT / "scripts" / "release_preflight.sh"
 README = ROOT / "README.md"
 
 
@@ -126,6 +127,13 @@ def test_prepare_release_opens_pr_into_main():
     assert "--head" in run and "RELEASE_BRANCH" in run
 
 
+def test_release_pr_is_opened_as_a_draft():
+    # Match Linthra: the release PR is opened as a draft so a maintainer
+    # deliberately marks it ready before merging.
+    run = _step("Open the release pull request")["run"]
+    assert "--draft" in run
+
+
 def test_checks_out_main_without_persisting_a_push_to_it():
     step = _step("Checkout main")
     assert step["with"]["ref"] == "main"
@@ -176,14 +184,33 @@ def test_dry_run_skips_commit_and_push():
     assert stop.get("if") == "env.DRY_RUN == 'true'"
 
 
-# --- (3) version-mismatch message in the publish workflow -------------------
+# --- (3) version-mismatch message in the shared preflight script ------------
 
 def test_version_mismatch_message_is_clear():
-    text = ANDROID_WORKFLOW.read_text()
-    # Names the current tag version, the current pubspec version, and the action.
+    # The tag/pubspec check lives in the local-twin preflight script that the
+    # publish workflow runs, so CI and a contributor's pre-tag check share one
+    # message. It must name the current tag version, the current pubspec
+    # version, and the next action.
+    text = PREFLIGHT.read_text()
     assert "current tag version" in text
     assert "current pubspec version" in text
     assert "Expected next action" in text
+
+
+def test_publish_workflow_runs_the_preflight_script():
+    # The Android publish workflow must delegate the tag/pubspec check to the
+    # shared script rather than re-implementing it inline.
+    text = ANDROID_WORKFLOW.read_text()
+    assert "scripts/release_preflight.sh" in text
+    assert "GITHUB_REF_NAME" in text
+
+
+def test_prepare_release_runs_the_preflight_after_bump():
+    # Prepare release re-runs the same preflight against the just-bumped pubspec
+    # so the eventual tag can never disagree with the release branch.
+    run = _step("Release preflight")["run"]
+    assert "scripts/release_preflight.sh" in run
+    assert "${TAG}" in run
 
 
 # --- (8) README documents the GitHub-only flow ------------------------------

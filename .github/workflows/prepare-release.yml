@@ -175,6 +175,15 @@ jobs:
           echo "Files changed by the bump:"
           git status --porcelain
 
+      - name: Release preflight (tag now matches the bumped pubspec)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The same local twin the publish workflow runs (scripts/release_preflight.sh):
+          # confirm app/pubspec.yaml now reads exactly the versionName the tag
+          # ${TAG} will carry, so the eventual tag can never mismatch the bump.
+          scripts/release_preflight.sh "${TAG}"
+
       - name: Stop here on dry run
         if: env.DRY_RUN == 'true'
         shell: bash
@@ -267,7 +276,7 @@ jobs:
             # branch is already pushed at this point, so downgrade *that* failure
             # to a warning and tell the maintainer how to open the PR by hand.
             # Any other failure (and the RELEASE_PAT path) still fails the job.
-            if create_output="$(gh pr create --base main --head "${RELEASE_BRANCH}" --title "${title}" --body-file pr-body.md 2>&1)"; then
+            if create_output="$(gh pr create --base main --head "${RELEASE_BRANCH}" --title "${title}" --body-file pr-body.md --draft 2>&1)"; then
               echo "${create_output}"
               pr_url="$(gh pr view "${RELEASE_BRANCH}" --json url --jq '.url' 2>/dev/null || echo "${create_output}" | grep -Eo 'https://[^ ]+/pull/[0-9]+' | head -n1 || true)"
               echo "PR_URL=${pr_url}" >> "${GITHUB_ENV}"

@@ -240,6 +240,8 @@ checkout required**:
    - The run is **safe to retry**: it is idempotent on the `release/vX.Y.Z`
      branch and reuses the same PR. It stops early with a clear message only if
      the tag `vX.Y.Z` already exists.
+   - The PR is opened as a **draft** — a maintainer marks it ready once the
+     checks are green.
    - Tick **dry run** to validate the version/tag/branch state without
      committing or pushing anything.
    - If your repository blocks Actions from opening PRs, the run still pushes
@@ -247,7 +249,10 @@ checkout required**:
      (`…/compare/main...release/vX.Y.Z`) in the job summary.
 
 2. **Merge the release PR.** Reviewing and merging the PR is what lands the
-   version bump on `main`.
+   version bump on `main`. CI runs a **release-bump guard** on `release/*` PRs
+   (`scripts/check_release_bump_files.sh`) that fails if the PR touches anything
+   beyond the version files (`app/pubspec.yaml`, `metadata/com.nexanote.app.yml`,
+   `CHANGELOG.md`), so the release commit stays a clean, version-only diff.
 
 3. **Create the GitHub Release / tag `vX.Y.Z` from `main`.** Use
    **Releases → Draft a new release**, choose tag `vX.Y.Z` targeting `main`, and
@@ -267,7 +272,10 @@ you created.
 
 > **Local alternative.** `scripts/bump_version.py X.Y.Z <code>` performs the
 > same bump on your machine if you prefer to commit and tag manually; it does
-> not create a git tag unless you pass `--tag`.
+> not create a git tag unless you pass `--tag`. Before pushing a tag, run
+> `scripts/release_preflight.sh vX.Y.Z` — the same check the Android publish
+> workflow runs — to confirm the tag matches `app/pubspec.yaml` and see the
+> next safe commands.
 
 ---
 
