@@ -483,65 +483,74 @@ class _InkToolbar extends StatelessWidget {
       ),
       child: Row(
         children: [
-          // Outils
-          _ToolBtn(
-            icon: Icons.edit,
-            label: 'Pen',
-            selected: currentTool == InkTool.pen,
-            onTap: () => onToolChanged(InkTool.pen),
-          ),
-          _ToolBtn(
-            icon: Icons.format_color_fill,
-            label: 'Highlighter',
-            selected: currentTool == InkTool.highlighter,
-            onTap: () => onToolChanged(InkTool.highlighter),
-          ),
-          _ToolBtn(
-            icon: Icons.auto_fix_normal,
-            label: 'Eraser',
-            selected: currentTool == InkTool.eraser,
-            onTap: () => onToolChanged(InkTool.eraser),
-          ),
+          // Tools, colours and width scroll horizontally so they never overflow
+          // on a narrow phone; undo/clear stay pinned on the right.
+          Expanded(
+            child: SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Row(
+                children: [
+                  // Outils
+                  _ToolBtn(
+                    icon: Icons.edit,
+                    label: 'Pen',
+                    selected: currentTool == InkTool.pen,
+                    onTap: () => onToolChanged(InkTool.pen),
+                  ),
+                  _ToolBtn(
+                    icon: Icons.format_color_fill,
+                    label: 'Highlighter',
+                    selected: currentTool == InkTool.highlighter,
+                    onTap: () => onToolChanged(InkTool.highlighter),
+                  ),
+                  _ToolBtn(
+                    icon: Icons.auto_fix_normal,
+                    label: 'Eraser',
+                    selected: currentTool == InkTool.eraser,
+                    onTap: () => onToolChanged(InkTool.eraser),
+                  ),
 
-          const VerticalDivider(width: 16, indent: 8, endIndent: 8),
+                  const VerticalDivider(width: 16, indent: 8, endIndent: 8),
 
-          // Couleurs
-          ...colors.map((c) => GestureDetector(
-                onTap: () => onColorChanged(c),
-                child: Container(
-                  width: 22,
-                  height: 22,
-                  margin: const EdgeInsets.symmetric(horizontal: 3),
-                  decoration: BoxDecoration(
-                    color: c,
-                    shape: BoxShape.circle,
-                    border: Border.all(
-                      color: currentColor == c
-                          ? scheme.primary
-                          : Colors.transparent,
-                      width: 2.5,
+                  // Couleurs
+                  ...colors.map((c) => GestureDetector(
+                        onTap: () => onColorChanged(c),
+                        child: Container(
+                          width: 22,
+                          height: 22,
+                          margin: const EdgeInsets.symmetric(horizontal: 3),
+                          decoration: BoxDecoration(
+                            color: c,
+                            shape: BoxShape.circle,
+                            border: Border.all(
+                              color: currentColor == c
+                                  ? scheme.primary
+                                  : Colors.transparent,
+                              width: 2.5,
+                            ),
+                          ),
+                        ),
+                      )),
+
+                  const VerticalDivider(width: 16, indent: 8, endIndent: 8),
+
+                  // Épaisseur
+                  const Icon(Icons.line_weight, size: 16),
+                  SizedBox(
+                    width: 80,
+                    child: Slider(
+                      value: currentWidth,
+                      min: 1.0,
+                      max: 12.0,
+                      divisions: 11,
+                      onChanged: onWidthChanged,
+                      activeColor: const Color(0xFF6366F1),
                     ),
                   ),
-                ),
-              )),
-
-          const VerticalDivider(width: 16, indent: 8, endIndent: 8),
-
-          // Épaisseur
-          const Icon(Icons.line_weight, size: 16),
-          SizedBox(
-            width: 80,
-            child: Slider(
-              value: currentWidth,
-              min: 1.0,
-              max: 12.0,
-              divisions: 11,
-              onChanged: onWidthChanged,
-              activeColor: const Color(0xFF6366F1),
+                ],
+              ),
             ),
           ),
-
-          const Spacer(),
 
           // Undo / Clear
           IconButton(

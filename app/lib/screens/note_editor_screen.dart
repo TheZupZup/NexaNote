@@ -70,74 +70,156 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // The editor renders inside two very different containers:
+    //  * On wide layouts it is embedded as a side panel inside HomeScreen's
+    //    Scaffold, which already provides a Material ancestor, a background and
+    //    has no system intrusions to dodge.
+    //  * On phones it is pushed as its own full-screen route, so it has to
+    //    bring its own Scaffold (Material + themed canvas + soft-keyboard inset
+    //    handling) and a SafeArea so the header clears the status bar/notch and
+    //    the footer clears the gesture navigation bar.
+    // 800px matches the breakpoint HomeScreen uses to pick desktop vs mobile.
+    final isMobile = MediaQuery.of(context).size.width <= 800;
+    final editor = _buildEditor(isMobile);
+    if (!isMobile) return editor;
+    return Scaffold(
+      backgroundColor: Theme.of(context).colorScheme.surface,
+      body: SafeArea(child: editor),
+    );
+  }
+
+  Widget _buildEditor(bool isMobile) {
+    return LayoutBuilder(builder: (context, constraints) {
+      // Drive spacing and header density from the *actual* width the editor is
+      // given — which on wide layouts is the panel, not the whole window — so a
+      // narrow panel reflows just like a phone would.
+      final width = constraints.maxWidth;
+      final compactHeader = width < 420;
+      final hPad = width < 380 ? 16.0 : 24.0;
+
+      return Column(children: [
+        _EditorHeader(
+          showBack: isMobile,
+          compact: compactHeader,
+          showInk: _showInk,
+          isSaving: _isSaving,
+          hasChanges: _hasChanges,
+          onBack: () => Navigator.pop(context),
+          onText: () => setState(() => _showInk = false),
+          onDraw: () => setState(() => _showInk = true),
+          onDelete: () {
+            context.read<AppState>().deleteNote(_note.id);
+            if (isMobile) Navigator.pop(context);
+          },
+        ),
+        // Title
+        Padding(
+          padding: EdgeInsets.fromLTRB(hPad, 16, hPad, 8),
+          child: TextField(
+            controller: _titleCtrl,
+            textCapitalization: TextCapitalization.sentences,
+            style: Theme.of(context).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.bold),
+            decoration: const InputDecoration(
+              hintText: 'Untitled', border: InputBorder.none, contentPadding: EdgeInsets.zero)),
+        ),
+        const Divider(height: 1),
+        // Content
+        Expanded(child: _showInk
+          ? InkCanvas(
+              initialStrokes: _note.pages?.isNotEmpty == true
+                ? _note.pages!.first.strokes.whereType<Map<String, dynamic>>().toList()
+                : [],
+              template: _note.pages?.isNotEmpty == true ? _note.pages!.first.template : 'blank',
+              onStrokesChanged: _saveInk)
+          : _TextBody(controller: _contentCtrl, horizontalPadding: hPad)),
+      ]);
+    });
+  }
+}
+
+/// The top chrome of the editor: back button (phones only), the Text/Draw mode
+/// toggle, a save-status indicator and the delete action. Reflows to an
+/// icon-only [compact] form on narrow widths so the controls never collide.
+class _EditorHeader extends StatelessWidget {
+  final bool showBack;
+  final bool compact;
+  final bool showInk;
+  final bool isSaving;
+  final bool hasChanges;
+  final VoidCallback onBack;
+  final VoidCallback onText;
+  final VoidCallback onDraw;
+  final VoidCallback onDelete;
+  const _EditorHeader({
+    required this.showBack,
+    required this.compact,
+    required this.showInk,
+    required this.isSaving,
+    required this.hasChanges,
+    required this.onBack,
+    required this.onText,
+    required this.onDraw,
+    required this.onDelete,
+  });
+
+  @override
+  Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    return Column(children: [
-      // Top bar
-      Container(height: 48, padding: const EdgeInsets.symmetric(horizontal: 16),
-        decoration: BoxDecoration(border: Border(bottom: BorderSide(color: scheme.outlineVariant))),
-        child: Row(children: [
-          if (MediaQuery.of(context).size.width <= 800)
-            IconButton(icon: const Icon(Icons.arrow_back), onPressed: () => Navigator.pop(context), visualDensity: VisualDensity.compact),
-          // Mode toggle
-          Container(decoration: BoxDecoration(color: scheme.surfaceContainerHighest.withOpacity(0.5), borderRadius: BorderRadius.circular(8)),
-            child: Row(mainAxisSize: MainAxisSize.min, children: [
-              _ModeBtn(icon: Icons.text_snippet_outlined, label: 'Text', selected: !_showInk, onTap: () => setState(() => _showInk = false)),
-              _ModeBtn(icon: Icons.draw_outlined, label: 'Draw', selected: _showInk, onTap: () => setState(() => _showInk = true)),
-            ])),
-          const Spacer(),
-          if (_isSaving)
-            const Row(mainAxisSize: MainAxisSize.min, children: [
-              SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 1.5, color: Color(0xFF6366F1))),
-              SizedBox(width: 6),
-              Text('Saving...', style: TextStyle(fontSize: 12, color: Colors.grey)),
-            ])
-          else if (_hasChanges)
-            const Text('Unsaved', style: TextStyle(fontSize: 12, color: Colors.orange))
-          else
-            const Row(mainAxisSize: MainAxisSize.min, children: [
-              Icon(Icons.check_circle_outline, size: 14, color: Colors.green),
-              SizedBox(width: 4),
-              Text('Saved', style: TextStyle(fontSize: 12, color: Colors.green)),
-            ]),
-          IconButton(icon: const Icon(Icons.delete_outline, size: 18), visualDensity: VisualDensity.compact,
-            onPressed: () {
-              context.read<AppState>().deleteNote(_note.id);
-              if (MediaQuery.of(context).size.width <= 800) Navigator.pop(context);
-            }),
-        ])),
-      // Titre
-      Padding(padding: const EdgeInsets.fromLTRB(24, 16, 24, 4),
-        child: TextField(controller: _titleCtrl,
-          style: Theme.of(context).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.bold),
-          decoration: const InputDecoration(hintText: 'Untitled', border: InputBorder.none, contentPadding: EdgeInsets.zero))),
-      const Divider(height: 1),
-      // Contenu
-      Expanded(child: _showInk
-        ? InkCanvas(
-            initialStrokes: _note.pages?.isNotEmpty == true
-              ? _note.pages!.first.strokes.whereType<Map<String, dynamic>>().toList()
-              : [],
-            template: _note.pages?.isNotEmpty == true ? _note.pages!.first.template : 'blank',
-            onStrokesChanged: _saveInk)
-        : Column(children: [
-            _FormatToolbar(controller: _contentCtrl),
-            const Divider(height: 1),
-            Expanded(child: Padding(padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-              child: TextField(controller: _contentCtrl, maxLines: null, expands: true,
-                textAlignVertical: TextAlignVertical.top,
-                style: const TextStyle(fontSize: 15, height: 1.7),
-                decoration: const InputDecoration(hintText: 'Start writing...', border: InputBorder.none, contentPadding: EdgeInsets.zero)))),
-            Container(height: 28, padding: const EdgeInsets.symmetric(horizontal: 16),
-              decoration: BoxDecoration(border: Border(top: BorderSide(color: scheme.outlineVariant))),
-              child: Row(children: [
-                Text('${_contentCtrl.text.split(' ').where((w) => w.isNotEmpty).length} words',
-                  style: TextStyle(fontSize: 11, color: scheme.onSurface.withOpacity(0.4))),
-                const SizedBox(width: 16),
-                Text('${_contentCtrl.text.length} chars',
-                  style: TextStyle(fontSize: 11, color: scheme.onSurface.withOpacity(0.4))),
-              ])),
-          ])),
-    ]);
+    return Container(
+      // A min-height (rather than a fixed height) keeps comfortable touch
+      // targets while letting the bar grow if text scaling needs it.
+      constraints: const BoxConstraints(minHeight: 56),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+      decoration: BoxDecoration(
+        border: Border(bottom: BorderSide(color: scheme.outlineVariant))),
+      child: Row(children: [
+        if (showBack)
+          IconButton(
+            icon: const Icon(Icons.arrow_back),
+            tooltip: 'Back',
+            visualDensity: VisualDensity.compact,
+            onPressed: onBack),
+        _ModeToggle(showInk: showInk, compact: compact, onText: onText, onDraw: onDraw),
+        const SizedBox(width: 8),
+        // Absorbs the remaining width and right-aligns the status so the toggle
+        // and the delete action never crowd each other.
+        Expanded(child: Align(
+          alignment: Alignment.centerRight,
+          child: _SaveStatus(isSaving: isSaving, hasChanges: hasChanges, compact: compact))),
+        const SizedBox(width: 4),
+        IconButton(
+          icon: const Icon(Icons.delete_outline),
+          iconSize: 20,
+          tooltip: 'Delete note',
+          visualDensity: VisualDensity.compact,
+          onPressed: onDelete),
+      ]),
+    );
+  }
+}
+
+/// Segmented Text/Draw switch. Drops the text labels (icon-only) when [compact]
+/// so it stays narrow on small phones.
+class _ModeToggle extends StatelessWidget {
+  final bool showInk;
+  final bool compact;
+  final VoidCallback onText;
+  final VoidCallback onDraw;
+  const _ModeToggle({required this.showInk, required this.compact, required this.onText, required this.onDraw});
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      padding: const EdgeInsets.all(3),
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainerHighest.withOpacity(0.5),
+        borderRadius: BorderRadius.circular(10)),
+      child: Row(mainAxisSize: MainAxisSize.min, children: [
+        _ModeBtn(icon: Icons.text_snippet_outlined, label: 'Text', selected: !showInk, compact: compact, onTap: onText),
+        _ModeBtn(icon: Icons.draw_outlined, label: 'Draw', selected: showInk, compact: compact, onTap: onDraw),
+      ]),
+    );
   }
 }
 
@@ -145,20 +227,102 @@ class _ModeBtn extends StatelessWidget {
   final IconData icon;
   final String label;
   final bool selected;
+  final bool compact;
   final VoidCallback onTap;
-  const _ModeBtn({required this.icon, required this.label, required this.selected, required this.onTap});
+  const _ModeBtn({required this.icon, required this.label, required this.selected, required this.compact, required this.onTap});
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(onTap: onTap,
-      child: Container(padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-        decoration: BoxDecoration(color: selected ? const Color(0xFF6366F1) : Colors.transparent, borderRadius: BorderRadius.circular(8)),
-        child: Row(mainAxisSize: MainAxisSize.min, children: [
-          Icon(icon, size: 16, color: selected ? Colors.white : Theme.of(context).colorScheme.onSurface.withOpacity(0.6)),
-          const SizedBox(width: 4),
-          Text(label, style: TextStyle(fontSize: 12, fontWeight: selected ? FontWeight.w600 : FontWeight.normal,
-            color: selected ? Colors.white : Theme.of(context).colorScheme.onSurface.withOpacity(0.6))),
-        ])));
+    final fg = selected ? Colors.white : Theme.of(context).colorScheme.onSurface.withOpacity(0.6);
+    return Tooltip(
+      message: label,
+      child: GestureDetector(
+        onTap: onTap,
+        behavior: HitTestBehavior.opaque,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 150),
+          padding: EdgeInsets.symmetric(horizontal: compact ? 12 : 14, vertical: 10),
+          decoration: BoxDecoration(
+            color: selected ? const Color(0xFF6366F1) : Colors.transparent,
+            borderRadius: BorderRadius.circular(8)),
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            Icon(icon, size: 18, color: fg),
+            if (!compact) ...[
+              const SizedBox(width: 6),
+              Text(label, style: TextStyle(
+                fontSize: 13,
+                fontWeight: selected ? FontWeight.w600 : FontWeight.normal,
+                color: fg)),
+            ],
+          ]),
+        ),
+      ),
+    );
+  }
+}
+
+/// Shows whether the note is saving / has unsaved edits / is saved. Collapses to
+/// just its icon (with a tooltip) when [compact] so it never pushes the header
+/// into an overflow on small screens.
+class _SaveStatus extends StatelessWidget {
+  final bool isSaving;
+  final bool hasChanges;
+  final bool compact;
+  const _SaveStatus({required this.isSaving, required this.hasChanges, required this.compact});
+
+  @override
+  Widget build(BuildContext context) {
+    if (isSaving) {
+      return _row(
+        const SizedBox(width: 14, height: 14,
+          child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFF6366F1))),
+        'Saving…', const Color(0xFF6366F1));
+    }
+    if (hasChanges) {
+      return _row(const Icon(Icons.cloud_upload_outlined, size: 16, color: Colors.orange),
+        'Unsaved', Colors.orange);
+    }
+    return _row(const Icon(Icons.check_circle_outline, size: 16, color: Colors.green),
+      'Saved', Colors.green);
+  }
+
+  Widget _row(Widget leading, String label, Color color) {
+    if (compact) return Tooltip(message: label, child: leading);
+    return Row(mainAxisSize: MainAxisSize.min, children: [
+      leading,
+      const SizedBox(width: 6),
+      Text(label, style: TextStyle(fontSize: 12, color: color)),
+    ]);
+  }
+}
+
+/// The typed-note body: markdown toolbar, the writing area, and a live
+/// word/character footer. Padding is supplied by the parent so the title, body
+/// and footer share one responsive gutter.
+class _TextBody extends StatelessWidget {
+  final TextEditingController controller;
+  final double horizontalPadding;
+  const _TextBody({required this.controller, required this.horizontalPadding});
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(children: [
+      _FormatToolbar(controller: controller),
+      const Divider(height: 1),
+      Expanded(child: Padding(
+        padding: EdgeInsets.symmetric(horizontal: horizontalPadding, vertical: 12),
+        child: TextField(
+          controller: controller,
+          maxLines: null,
+          expands: true,
+          textAlignVertical: TextAlignVertical.top,
+          keyboardType: TextInputType.multiline,
+          textCapitalization: TextCapitalization.sentences,
+          style: const TextStyle(fontSize: 15, height: 1.7),
+          decoration: const InputDecoration(
+            hintText: 'Start writing...', border: InputBorder.none, contentPadding: EdgeInsets.zero)))),
+      _WordCountFooter(controller: controller, horizontalPadding: horizontalPadding),
+    ]);
   }
 }
 
@@ -187,18 +351,34 @@ class _FormatToolbar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return SingleChildScrollView(scrollDirection: Axis.horizontal,
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+    // Horizontal scrolling guarantees every button stays reachable even when
+    // the toolbar is wider than a small phone.
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
       child: Row(children: [
         _Btn(icon: Icons.format_bold, tooltip: 'Bold', onTap: () => _wrap('**', '**')),
         _Btn(icon: Icons.format_italic, tooltip: 'Italic', onTap: () => _wrap('*', '*')),
         _Btn(icon: Icons.code, tooltip: 'Code', onTap: () => _wrap('`', '`')),
-        const VerticalDivider(width: 16, indent: 6, endIndent: 6),
+        const _ToolbarDivider(),
         _Btn(icon: Icons.title, tooltip: 'Heading', onTap: () => _line('#')),
         _Btn(icon: Icons.format_list_bulleted, tooltip: 'Bullet', onTap: () => _line('-')),
         _Btn(icon: Icons.check_box_outlined, tooltip: 'Checkbox', onTap: () => _line('- [ ]')),
         _Btn(icon: Icons.format_quote, tooltip: 'Quote', onTap: () => _line('>')),
-      ]));
+      ]),
+    );
+  }
+}
+
+class _ToolbarDivider extends StatelessWidget {
+  const _ToolbarDivider();
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 1,
+      height: 24,
+      margin: const EdgeInsets.symmetric(horizontal: 6),
+      color: Theme.of(context).colorScheme.outlineVariant);
   }
 }
 
@@ -210,9 +390,47 @@ class _Btn extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Tooltip(message: tooltip,
-      child: InkWell(onTap: onTap, borderRadius: BorderRadius.circular(6),
-        child: Padding(padding: const EdgeInsets.all(6),
-          child: Icon(icon, size: 18, color: Theme.of(context).colorScheme.onSurface.withOpacity(0.6)))));
+    return Tooltip(
+      message: tooltip,
+      // 12px padding around a 20px icon yields a ~44px touch target, in line
+      // with the Material minimum.
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(10),
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Icon(icon, size: 20, color: Theme.of(context).colorScheme.onSurface.withOpacity(0.7)))));
+  }
+}
+
+/// Live word/character count. Listens to the controller so the numbers update
+/// as you type rather than only on the next rebuild.
+class _WordCountFooter extends StatelessWidget {
+  final TextEditingController controller;
+  final double horizontalPadding;
+  const _WordCountFooter({required this.controller, required this.horizontalPadding});
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final style = TextStyle(fontSize: 11, color: scheme.onSurface.withOpacity(0.45));
+    return Container(
+      constraints: const BoxConstraints(minHeight: 36),
+      alignment: Alignment.centerLeft,
+      padding: EdgeInsets.symmetric(horizontal: horizontalPadding, vertical: 8),
+      decoration: BoxDecoration(
+        border: Border(top: BorderSide(color: scheme.outlineVariant))),
+      child: ValueListenableBuilder<TextEditingValue>(
+        valueListenable: controller,
+        builder: (context, value, _) {
+          final text = value.text;
+          final words = text.trim().isEmpty ? 0 : text.trim().split(RegExp(r'\s+')).length;
+          return Row(children: [
+            Text('$words words', style: style),
+            const SizedBox(width: 16),
+            Text('${text.length} chars', style: style),
+          ]);
+        }),
+    );
   }
 }
