@@ -18,8 +18,22 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
   Timer? _saveTimer;
   bool _isSaving = false;
   bool _hasChanges = false;
+  bool _inkSaveFailed = false;
   late Note _note;
   bool _showInk = false;
+
+  /// The current ink strokes (editor/wire shape). Held in memory so toggling
+  /// Text↔Draw rebuilds the canvas from the *latest* drawing rather than the
+  /// strokes the note was first opened with — switching modes never loses an
+  /// unsaved-to-screen stroke.
+  late List<Map<String, dynamic>> _inkStrokes;
+
+  /// Captured once dependencies are available so [dispose] can flush pending
+  /// edits without touching `context` (which is unsafe after unmount) or
+  /// `setState` (which throws on an unmounted widget). Nullable because some
+  /// pure layout tests pump the editor without an AppState provider; those
+  /// never make edits, so the flush is a no-op there.
+  AppState? _appState;
 
   @override
   void initState() {
@@ -29,8 +43,22 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     _titleCtrl = TextEditingController(text: _note.title);
     _contentCtrl = TextEditingController(
       text: _note.pages?.isNotEmpty == true ? _note.pages!.first.typedContent : '');
+    _inkStrokes = _note.pages?.isNotEmpty == true
+        ? _note.pages!.first.strokes.whereType<Map<String, dynamic>>().toList()
+        : <Map<String, dynamic>>[];
     _titleCtrl.addListener(_onChanged);
     _contentCtrl.addListener(_onChanged);
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // Read defensively: layout tests pump this screen without a provider.
+    try {
+      _appState = context.read<AppState>();
+    } catch (_) {
+      _appState = null;
+    }
   }
 
   void _onChanged() {
@@ -41,28 +69,67 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
 
   Future<void> _save() async {
     if (!_hasChanges) return;
-    setState(() => _isSaving = true);
-    final state = context.read<AppState>();
+    if (mounted) setState(() => _isSaving = true);
+    final ok = await _persist();
+    if (!mounted) return;
+    setState(() {
+      _isSaving = false;
+      if (ok) _hasChanges = false;
+    });
+  }
+
+  /// Writes the title and (in text mode) the body to local/remote storage.
+  /// Returns whether the write succeeded. Deliberately free of `setState`/
+  /// `context` use so [dispose] can call it to flush the last edits even after
+  /// the widget has been unmounted — the bug that previously lost anything
+  /// typed in the final debounce window.
+  Future<bool> _persist() async {
+    if (!_hasChanges) return true;
+    final state = _appState;
+    if (state == null) return false;
     try {
-      if (_titleCtrl.text != _note.title) await state.updateNoteTitle(_note.id, _titleCtrl.text);
+      if (_titleCtrl.text != _note.title) {
+        await state.updateNoteTitle(_note.id, _titleCtrl.text);
+      }
       if (!_showInk) await state.savePageText(_note.id, 1, _contentCtrl.text);
-      setState(() => _hasChanges = false);
+      return true;
     } catch (e) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Save failed: $e'), backgroundColor: Colors.red));
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Save failed: $e'), backgroundColor: Colors.red));
+      }
+      return false;
     }
-    if (mounted) setState(() => _isSaving = false);
   }
 
   Future<void> _saveInk(List<Map<String, dynamic>> strokes) async {
-    try { await context.read<AppState>().client.savePageInk(_note.id, 1, strokes); }
-    catch (e) { debugPrint('Ink save error: $e'); }
+    // Keep the on-screen drawing in memory first so a failed persist (or a
+    // mode toggle) never drops what the user just drew.
+    _inkStrokes = strokes;
+    final state = _appState;
+    if (state == null) return;
+    try {
+      await state.savePageInk(_note.id, 1, strokes);
+      _inkSaveFailed = false;
+    } catch (e) {
+      debugPrint('Ink save error: $e');
+      // Surface a friendly, throttled error rather than silently dropping the
+      // stroke. The drawing stays on screen regardless.
+      if (mounted && !_inkSaveFailed) {
+        _inkSaveFailed = true;
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('Could not save drawing — it stays on screen, retrying as you draw.'),
+          backgroundColor: Colors.red));
+      }
+    }
   }
 
   @override
   void dispose() {
     _saveTimer?.cancel();
-    _save();
+    // Flush any pending text edits synchronously-scheduled before teardown.
+    // _persist captures its AppState reference, so this is safe post-unmount.
+    _persist();
     _titleCtrl.dispose();
     _contentCtrl.dispose();
     super.dispose();
@@ -126,9 +193,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
         // Content
         Expanded(child: _showInk
           ? InkCanvas(
-              initialStrokes: _note.pages?.isNotEmpty == true
-                ? _note.pages!.first.strokes.whereType<Map<String, dynamic>>().toList()
-                : [],
+              initialStrokes: _inkStrokes,
               template: _note.pages?.isNotEmpty == true ? _note.pages!.first.template : 'blank',
               onStrokesChanged: _saveInk)
           : _TextBody(controller: _contentCtrl, horizontalPadding: hPad)),

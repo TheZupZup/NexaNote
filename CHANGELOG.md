@@ -8,7 +8,29 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
 
-_Nothing yet._
+### Fixed
+
+- **Offline drawings now persist.** Ink strokes drawn in a note were sent
+  straight to the backend HTTP API and dropped in offline/local mode, and were
+  never reloaded (the local note always reported zero strokes). Drawings now
+  save to the on-device SQLite store after every completed stroke, reload when
+  the note is reopened, and survive switching between Text and Draw mode.
+- **Offline text autosave on leave.** Leaving the editor flushed pending edits
+  through a code path that touched `setState` on an unmounted widget and threw
+  before saving, losing anything typed in the final debounce window. The flush
+  is now `setState`-free and reliably persists the last edits.
+- Saved offline notes and drawings are marked `modified` so a later sync
+  uploads them.
+
+### Changed
+
+- **Android updates install over the existing app.** Release APKs are now
+  signed with a stable upload key supplied via CI secrets, so each GitHub
+  Release APK installs as an update over the previous one without
+  uninstall/reinstall and with app data preserved. Falls back to debug signing
+  for local and F-Droid builds. See `docs/ANDROID_SIGNING.md`.
+- Settings screen respects the bottom safe area and gives long data-directory
+  paths room to wrap.
 
 ---
 

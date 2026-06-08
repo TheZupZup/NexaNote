@@ -74,6 +74,12 @@ class LocalNoteService {
   Future<List<Stroke>> getStrokesForNote(String noteId) =>
       _repo.getStrokesForNote(noteId);
 
+  /// Swaps the note's whole stroke set for [strokes] in one transaction. Used
+  /// by the offline ink editor, which re-saves the complete drawing after each
+  /// completed stroke.
+  Future<void> replaceStrokesForNote(String noteId, List<Stroke> strokes) =>
+      _repo.replaceStrokesForNote(noteId, strokes);
+
   /// Snapshot of all locally-stored notebooks and notes.
   ///
   /// Strokes are intentionally excluded — sync covers metadata only.
