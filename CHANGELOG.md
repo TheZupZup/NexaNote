@@ -6,7 +6,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-## Unreleased — Sync reliability & diagnostics
+## Unreleased
+
+_Nothing yet._
+
+---
+
+## v1.1.0 — Sync reliability & diagnostics
 
 ### New
 
