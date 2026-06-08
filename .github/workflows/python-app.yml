@@ -37,3 +37,28 @@ jobs:
     - name: Test with pytest
       run: |
         pytest
+
+  release-bump-guard:
+    name: Release bump touches only version files
+    runs-on: ubuntu-latest
+    # Only meaningful for the version-bump PRs the "Prepare release" workflow
+    # opens (it pushes a release/vX.Y.Z branch). github.head_ref is set only for
+    # pull_request events, so this naturally skips pushes to main and every
+    # non-release PR.
+    if: ${{ startsWith(github.head_ref, 'release/') }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Diff the PR against its base and assert the changed files stay within the
+      # version-bump allowlist (app/pubspec.yaml, the F-Droid metadata, and
+      # CHANGELOG.md). Local twin: scripts/check_release_bump_files.sh.
+      - name: Check changed files
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          git diff --name-only "$BASE_SHA" HEAD \
+            | ./scripts/check_release_bump_files.sh
