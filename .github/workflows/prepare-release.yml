@@ -3,26 +3,28 @@ name: Prepare release
 # Cut a NexaNote release from the GitHub web UI — no local checkout needed.
 # Given a versionName (X.Y.Z) and versionCode, this workflow:
 #   1. checks out main,
-#   2. runs scripts/bump_version.py to update app/pubspec.yaml, the F-Droid
+#   2. validates the version/tag/branch state (and stops here in dry-run mode),
+#   3. runs scripts/bump_version.py to update app/pubspec.yaml, the F-Droid
 #      metadata, and CHANGELOG.md,
-#   3. commits the bump as `chore: release vX.Y.Z` on a new `release/vX.Y.Z`
-#      branch (github-actions[bot] author),
-#   4. pushes that release branch, and
-#   5. opens a pull request into main titled `chore: release vX.Y.Z` (or, if the
-#      repository blocks Actions from creating PRs, prints a link to open it by
-#      hand instead of failing the run — the branch is already pushed).
+#   4. commits the bump as `chore: release vX.Y.Z` on a `release/vX.Y.Z` branch
+#      (github-actions[bot] author),
+#   5. pushes that release branch, and
+#   6. opens (or updates) a pull request into main titled `chore: release vX.Y.Z`
+#      (or, if the repository blocks Actions from creating PRs, prints a link to
+#      open it by hand instead of failing the run — the branch is already pushed).
+#
+# It is designed to be SAFE TO RE-RUN. If a previous attempt failed partway
+# through, running it again regenerates a clean bump on the same release branch
+# and updates the existing PR instead of erroring out. The only hard stop is a
+# tag that already exists (see below) — every other "already exists" condition is
+# handled and explained rather than failed.
 #
 # It NEVER pushes to main directly — main is a protected branch, so the bump
 # lands only when a maintainer merges the PR. It also no longer creates the
 # `vX.Y.Z` tag here: the tag has to point at the commit that actually lands on
 # main, which exists only after the merge (and may be a squash/rebase commit).
-# After merging the release PR, tag the merge commit and push the tag:
-#
-#   git tag vX.Y.Z <merge-commit> && git push origin vX.Y.Z
-#
-# That tag is what drives publishing: android-release.yml builds and attaches
-# the APK and docker-publish.yml publishes the Docker image when `vX.Y.Z`
-# appears.
+# After merging the release PR, create the GitHub Release / tag `vX.Y.Z` from
+# main and the publish workflows take over.
 #
 # Triggering CI on the PR: anything created or pushed with the default
 # GITHUB_TOKEN does NOT start other workflow runs (GitHub blocks recursive
@@ -36,13 +38,18 @@ on:
   workflow_dispatch:
     inputs:
       version_name:
-        description: "versionName — semver X.Y.Z, e.g. 1.1.0"
+        description: "versionName — semver X.Y.Z, e.g. 1.1.1"
         required: true
         type: string
       version_code:
-        description: "versionCode — monotonic integer, e.g. 4"
+        description: "versionCode — monotonic integer, e.g. 5"
         required: true
         type: string
+      dry_run:
+        description: "Validate the version/tag/branch state without committing or pushing"
+        required: false
+        default: false
+        type: boolean
 
 # Never let two release-prep runs race on the same release branch / PR.
 concurrency:
@@ -62,6 +69,7 @@ jobs:
     env:
       VERSION_NAME: ${{ inputs.version_name }}
       VERSION_CODE: ${{ inputs.version_code }}
+      DRY_RUN: ${{ inputs.dry_run }}
 
     steps:
       - name: Validate inputs
@@ -78,7 +86,11 @@ jobs:
           fi
           echo "TAG=v${VERSION_NAME}" >> "${GITHUB_ENV}"
           echo "RELEASE_BRANCH=release/v${VERSION_NAME}" >> "${GITHUB_ENV}"
-          echo "Preparing release v${VERSION_NAME} (versionCode ${VERSION_CODE})."
+          if [[ "${DRY_RUN}" == "true" ]]; then
+            echo "Validating release v${VERSION_NAME} (versionCode ${VERSION_CODE}) — DRY RUN, nothing will be pushed."
+          else
+            echo "Preparing release v${VERSION_NAME} (versionCode ${VERSION_CODE})."
+          fi
 
       - name: Checkout main
         uses: actions/checkout@v4
@@ -95,15 +107,45 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
-            echo "::error::Tag ${TAG} already exists locally. Choose a new version."
-            exit 1
-          fi
-          if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
-            echo "::error::Tag ${TAG} already exists on origin. Choose a new version."
+          # A tag that already exists is the one condition we cannot safely
+          # reuse: it may already point at a published release. Stop early with
+          # an actionable message and the exact command to remove it, rather
+          # than letting a later step fail with a confusing error.
+          cleanup="git push origin :refs/tags/${TAG}"
+          if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null \
+            || git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+            echo "::error::Tag ${TAG} already exists. Delete it or choose a new version."
+            echo "To delete the existing tag and retry, run:"
+            echo "    ${cleanup}"
             exit 1
           fi
           echo "Tag ${TAG} is available."
+
+      - name: Inspect existing release branch (idempotent re-run)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The release/* branch is owned entirely by this workflow. If a
+          # previous (possibly failed) run left one behind, do NOT hard fail —
+          # report what it currently contains and let the bump below regenerate
+          # it cleanly from main. This is what makes re-running safe.
+          expected="version: ${VERSION_NAME}+${VERSION_CODE}"
+          if git ls-remote --exit-code --heads origin "${RELEASE_BRANCH}" >/dev/null 2>&1; then
+            echo "Release branch ${RELEASE_BRANCH} already exists on origin."
+            existing_pubspec="$(git show "origin/${RELEASE_BRANCH}:app/pubspec.yaml" 2>/dev/null || true)"
+            if grep -qF "${expected}" <<<"${existing_pubspec}"; then
+              echo "It already contains the expected bump (${expected})."
+              echo "Re-running will regenerate it cleanly from main and reuse the same PR."
+            else
+              current="$(grep -E '^version:' <<<"${existing_pubspec}" || echo 'unknown')"
+              echo "::warning::${RELEASE_BRANCH} does not yet contain the expected bump."
+              echo "  branch pubspec:   ${current:-<missing>}"
+              echo "  expected pubspec: ${expected}"
+              echo "Re-running will overwrite the branch with a fresh bump from main (the branch is workflow-owned)."
+            fi
+          else
+            echo "No existing ${RELEASE_BRANCH} on origin — a fresh one will be created."
+          fi
 
       - name: Fail if working tree is dirty
         shell: bash
@@ -133,7 +175,20 @@ jobs:
           echo "Files changed by the bump:"
           git status --porcelain
 
+      - name: Stop here on dry run
+        if: env.DRY_RUN == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "DRY RUN: validation passed for ${TAG} (versionCode ${VERSION_CODE})."
+          echo "No commit, branch, or PR was created. Re-run with dry_run = false to prepare the release."
+          # Record dry-run state for the summary step.
+          {
+            echo "DRY_RUN_OK=true"
+          } >> "${GITHUB_ENV}"
+
       - name: Commit the bump on a release branch and push
+        if: env.DRY_RUN != 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -152,6 +207,7 @@ jobs:
           echo "Pushed ${RELEASE_BRANCH}."
 
       - name: Open the release pull request
+        if: env.DRY_RUN != 'true'
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.RELEASE_PAT || github.token }}
@@ -177,13 +233,9 @@ jobs:
 
           ### After merging
 
-          Tag the merge commit `__TAG__` and push the tag to start the APK
+          Create the GitHub Release / tag `__TAG__` from `main` to start the APK
           (`android-release.yml`) and Docker (`docker-publish.yml`) publish
-          workflows:
-
-          ```
-          git tag __TAG__ <merge-commit> && git push origin __TAG__
-          ```
+          workflows.
           EOF
 
           sed \
@@ -197,12 +249,16 @@ jobs:
           # Compare view a maintainer can open the PR from by hand if this
           # workflow isn't allowed to create one.
           compare_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/compare/main...${RELEASE_BRANCH}"
+          # Make the manual fallback URL available to the summary step too.
+          echo "MANUAL_PR_URL=${compare_url}" >> "${GITHUB_ENV}"
 
           # On a re-run the branch is force-pushed above; update the existing PR
           # instead of failing on "a pull request already exists".
           existing="$(gh pr list --head "${RELEASE_BRANCH}" --base main --state open --json number --jq '.[0].number // empty')"
           if [[ -n "${existing}" ]]; then
             gh pr edit "${existing}" --title "${title}" --body-file pr-body.md
+            pr_url="$(gh pr view "${existing}" --json url --jq '.url')"
+            echo "PR_URL=${pr_url}" >> "${GITHUB_ENV}"
             echo "Updated existing release PR #${existing} for ${RELEASE_BRANCH}."
           else
             # Some repositories disable "Allow GitHub Actions to create and
@@ -213,6 +269,8 @@ jobs:
             # Any other failure (and the RELEASE_PAT path) still fails the job.
             if create_output="$(gh pr create --base main --head "${RELEASE_BRANCH}" --title "${title}" --body-file pr-body.md 2>&1)"; then
               echo "${create_output}"
+              pr_url="$(gh pr view "${RELEASE_BRANCH}" --json url --jq '.url' 2>/dev/null || echo "${create_output}" | grep -Eo 'https://[^ ]+/pull/[0-9]+' | head -n1 || true)"
+              echo "PR_URL=${pr_url}" >> "${GITHUB_ENV}"
               echo "Opened release PR for ${RELEASE_BRANCH}."
             elif grep -qi "not permitted to create or approve pull requests" <<<"${create_output}"; then
               echo "${create_output}" >&2
@@ -225,3 +283,33 @@ jobs:
               exit 1
             fi
           fi
+
+      - name: Release summary
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "## Prepare release — ${TAG:-<invalid version>}"
+            echo ""
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| Release version | ${VERSION_NAME} (\`${TAG:-?}\`) |"
+            echo "| Version code | ${VERSION_CODE} |"
+            echo "| Release branch | \`${RELEASE_BRANCH:-?}\` |"
+            echo "| Mode | ${DRY_RUN:-false} |"
+            if [[ -n "${PR_URL:-}" ]]; then
+              echo "| Pull request | ${PR_URL} |"
+            fi
+            if [[ -n "${MANUAL_PR_URL:-}" ]]; then
+              echo "| Manual PR URL | ${MANUAL_PR_URL} |"
+            fi
+            echo ""
+            if [[ "${DRY_RUN:-false}" == "true" ]]; then
+              echo "**Dry run** — no commit, branch, or PR was created."
+              echo ""
+              echo "**Next step:** re-run with \`dry_run = false\` to prepare the release."
+            else
+              echo "**Next step:** Merge the release PR, then create tag ${TAG} from main."
+            fi
+          } | tee -a "${GITHUB_STEP_SUMMARY}"
