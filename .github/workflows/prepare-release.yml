@@ -1,0 +1,135 @@
+name: Prepare release
+
+# Cut a NexaNote release entirely from the GitHub web UI — no local checkout
+# needed. Given a versionName (X.Y.Z) and versionCode, this workflow:
+#   1. checks out main,
+#   2. runs scripts/bump_version.py to update app/pubspec.yaml, the F-Droid
+#      metadata, and CHANGELOG.md,
+#   3. commits the bump as `chore: release vX.Y.Z` (github-actions[bot] author),
+#   4. pushes the commit to main, and
+#   5. creates and pushes the `vX.Y.Z` tag.
+#
+# It only *prepares* the release. Publishing stays with the existing
+# tag-triggered workflows: android-release.yml builds and attaches the APK and
+# docker-publish.yml publishes the Docker image when a `vX.Y.Z` tag appears.
+#
+# Triggering those publish workflows: a push made with the default GITHUB_TOKEN
+# does NOT start other workflow runs (GitHub blocks recursive triggers). So for
+# the tag push below to actually kick off android-release / docker-publish, add a
+# repository secret named RELEASE_PAT — a PAT (or GitHub App token) with
+# `contents: write` and workflow permissions — which is used to push when set.
+# Without it the bump, commit, and tag still succeed; you would then start the
+# publish workflows manually (re-push the tag, or run them via workflow_dispatch).
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_name:
+        description: "versionName — semver X.Y.Z, e.g. 1.1.0"
+        required: true
+        type: string
+      version_code:
+        description: "versionCode — monotonic integer, e.g. 4"
+        required: true
+        type: string
+
+# Never let two release-prep runs race on main / the tag at the same time.
+concurrency:
+  group: prepare-release
+  cancel-in-progress: false
+
+jobs:
+  prepare-release:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    # Pass inputs through the environment rather than interpolating them into
+    # run scripts, so a value like `$(...)` can never be shell-injected.
+    env:
+      VERSION_NAME: ${{ inputs.version_name }}
+      VERSION_CODE: ${{ inputs.version_code }}
+
+    steps:
+      - name: Validate inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "${VERSION_NAME}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::version_name must look like X.Y.Z (got '${VERSION_NAME}')."
+            exit 1
+          fi
+          if [[ ! "${VERSION_CODE}" =~ ^[0-9]+$ ]]; then
+            echo "::error::version_code must be a positive integer (got '${VERSION_CODE}')."
+            exit 1
+          fi
+          echo "TAG=v${VERSION_NAME}" >> "${GITHUB_ENV}"
+          echo "Preparing release v${VERSION_NAME} (versionCode ${VERSION_CODE})."
+
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          # Full history + tags so the "tag already exists" check is reliable.
+          fetch-depth: 0
+          # Prefer a PAT/App token so the resulting tag push triggers the
+          # tag-driven publish workflows; fall back to GITHUB_TOKEN otherwise.
+          token: ${{ secrets.RELEASE_PAT || github.token }}
+          persist-credentials: true
+
+      - name: Fail if tag already exists
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            echo "::error::Tag ${TAG} already exists locally. Choose a new version."
+            exit 1
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+            echo "::error::Tag ${TAG} already exists on origin. Choose a new version."
+            exit 1
+          fi
+          echo "Tag ${TAG} is available."
+
+      - name: Fail if working tree is dirty
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "$(git status --porcelain)" ]]; then
+            echo "::error::Working tree has unexpected changes before the bump:"
+            git status --porcelain
+            exit 1
+          fi
+          echo "Working tree is clean."
+
+      - name: Bump version
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/bump_version.py "${VERSION_NAME}" "${VERSION_CODE}"
+
+      - name: Verify the bump produced changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "$(git status --porcelain)" ]]; then
+            echo "::error::scripts/bump_version.py produced no changes — nothing to release."
+            exit 1
+          fi
+          echo "Files changed by the bump:"
+          git status --porcelain
+
+      - name: Commit, tag, and push
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "chore: release ${TAG}"
+          git tag "${TAG}"
+          # Push the commit and the tag together so we never leave main updated
+          # without its matching tag (or vice versa).
+          git push --atomic origin "HEAD:refs/heads/main" "refs/tags/${TAG}"
+          echo "Pushed release commit to main and tag ${TAG}."
