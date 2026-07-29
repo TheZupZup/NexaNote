@@ -75,6 +75,33 @@ class Note {
             ? (j['pages'] as List).map((p) => NotePage.fromJson(p)).toList()
             : null,
       );
+
+  Note copyWith({
+    String? title,
+    String? noteType,
+    String? notebookId,
+    List<String>? tags,
+    bool? isPinned,
+    bool? isDeleted,
+    int? pageCount,
+    String? updatedAt,
+    String? createdAt,
+    List<NotePage>? pages,
+  }) {
+    return Note(
+      id: id,
+      title: title ?? this.title,
+      noteType: noteType ?? this.noteType,
+      notebookId: notebookId ?? this.notebookId,
+      tags: tags ?? this.tags,
+      isPinned: isPinned ?? this.isPinned,
+      isDeleted: isDeleted ?? this.isDeleted,
+      pageCount: pageCount ?? this.pageCount,
+      updatedAt: updatedAt ?? this.updatedAt,
+      createdAt: createdAt ?? this.createdAt,
+      pages: pages ?? this.pages,
+    );
+  }
 }
 
 class NotePage {
@@ -256,7 +283,8 @@ class ApiClient {
     );
   }
 
-  Future<void> savePageInk(String noteId, int pageNum, List<Map<String, dynamic>> strokes) async {
+  Future<void> savePageInk(
+      String noteId, int pageNum, List<Map<String, dynamic>> strokes) async {
     await http.put(
       Uri.parse('$baseUrl/notes/$noteId/pages/$pageNum/ink'),
       headers: _headers,
