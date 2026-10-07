@@ -24,15 +24,17 @@ void main() {
             throwsA(isA<ApiException>()));
       });
 
-      test('deleteNote throws on HTTP $status', () async {
-        await expectLater(clientReturning(status).deleteNote('n'),
-            throwsA(isA<ApiException>()));
-      });
+      if (status != 404) {
+        test('deleteNote throws on HTTP $status', () async {
+          await expectLater(clientReturning(status).deleteNote('n'),
+              throwsA(isA<ApiException>()));
+        });
 
-      test('deleteNotebook throws on HTTP $status', () async {
-        await expectLater(clientReturning(status).deleteNotebook('nb'),
-            throwsA(isA<ApiException>()));
-      });
+        test('deleteNotebook throws on HTTP $status', () async {
+          await expectLater(clientReturning(status).deleteNotebook('nb'),
+              throwsA(isA<ApiException>()));
+        });
+      }
     }
   });
 
@@ -41,6 +43,12 @@ void main() {
     await clientReturning(200, '{}').savePageInk('n', 1, const []);
     await clientReturning(204).deleteNote('n');
     await clientReturning(204).deleteNotebook('nb');
+  });
+
+  test('deleting something that is already gone (404) is not an error',
+      () async {
+    await clientReturning(404).deleteNote('n');
+    await clientReturning(404).deleteNotebook('nb');
   });
 
   testWidgets('a backend that never answers times out instead of hanging',

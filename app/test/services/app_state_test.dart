@@ -1,4 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sqflite/sqflite.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
@@ -771,6 +773,62 @@ void main() {
       expect(s.needsOnboarding, isFalse);
       expect(s.isBackendConfigured, isTrue);
       expect(s.apiUrl, 'http://192.0.2.10:8766');
+    });
+  });
+
+  group('HTTP client errors', () {
+    const notesJson =
+        '[{"id":"a","title":"A","note_type":"typed","tags":[],"is_pinned":false,'
+        '"is_deleted":false,"page_count":1,"updated_at":"","created_at":""},'
+        '{"id":"b","title":"B","note_type":"typed","tags":[],"is_pinned":false,'
+        '"is_deleted":false,"page_count":1,"updated_at":"","created_at":""}]';
+
+    AppState backendAnswering(int Function(http.Request) statusFor) {
+      final mock = MockClient((req) async {
+        final path = req.url.path;
+        if (path == '/health') return http.Response('{}', 200);
+        if (path == '/notebooks') return http.Response('[]', 200);
+        if (path == '/notes' && req.method == 'GET') {
+          return http.Response(notesJson, 200);
+        }
+        return http.Response('{"detail":"x"}', statusFor(req));
+      });
+      return AppState(
+          localService: service,
+          clientFactory: (url) => api.ApiClient(baseUrl: url, httpClient: mock));
+    }
+
+    test('deleting a note another device already deleted is not an outage',
+        () async {
+      final s = backendAnswering((_) => 404);
+      await s.connect(url: 'http://srv.test');
+
+      await s.deleteNote('a');
+
+      expect(s.isBackendAvailable, isTrue);
+      expect(s.notes.map((n) => n.id), ['b']);
+    });
+
+    test('a 4xx on a save is reported but keeps the app online', () async {
+      final s = backendAnswering((_) => 422);
+      await s.connect(url: 'http://srv.test');
+
+      await expectLater(
+          s.savePageText('a', 1, 'x'), throwsA(isA<api.ApiException>()));
+
+      expect(s.isBackendAvailable, isTrue);
+      expect(s.backendErrorMessage, isNull);
+      expect(s.notes.map((n) => n.id), ['a', 'b']);
+    });
+
+    test('a 5xx still switches to offline mode', () async {
+      final s = backendAnswering((_) => 503);
+      await s.connect(url: 'http://srv.test');
+
+      await expectLater(
+          s.savePageText('a', 1, 'x'), throwsA(isA<api.ApiException>()));
+
+      expect(s.isBackendAvailable, isFalse);
     });
   });
 }

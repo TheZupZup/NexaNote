@@ -230,7 +230,8 @@ class ApiClient {
     const what = 'Failed to delete notebook';
     final resp = await _send(
         what, (c) => c.delete(Uri.parse('$baseUrl/notebooks/$id')));
-    _expect(resp, what, const [200, 204]);
+    // 404: already gone (deleted from another device), which is the goal.
+    _expect(resp, what, const [200, 204, 404]);
   }
 
   // ----------------------------------------------------------------
@@ -315,7 +316,8 @@ class ApiClient {
     const what = 'Failed to delete note';
     final resp =
         await _send(what, (c) => c.delete(Uri.parse('$baseUrl/notes/$id')));
-    _expect(resp, what, const [200, 204]);
+    // 404: already gone (deleted from another device), which is the goal.
+    _expect(resp, what, const [200, 204, 404]);
   }
 
   Future<void> restoreNote(String id) async {

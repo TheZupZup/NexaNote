@@ -742,7 +742,15 @@ class AppState extends ChangeNotifier {
   /// refreshes [_notebooks]/[_notes] from the local SQLite store so the UI can
   /// keep working offline. Reuses the same flag and message as the
   /// startup-time path so the existing offline banner kicks in unchanged.
-  Future<void> _handleBackendFailure(Object _) async {
+  Future<void> _handleBackendFailure(Object error) async {
+    // The server answered with a client error (404 for a note another device
+    // already deleted, 409, 422...): it is up, so don't switch the whole app
+    // to the offline banner and the local cache.
+    if (error is api.ApiException &&
+        error.statusCode != null &&
+        error.statusCode! < 500) {
+      return;
+    }
     final wasAvailable = _isBackendAvailable;
     _isBackendAvailable = false;
     _backendErrorMessage = 'Offline mode — backend unavailable';
