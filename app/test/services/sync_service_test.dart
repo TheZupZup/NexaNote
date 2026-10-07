@@ -380,6 +380,20 @@ void main() {
       expect(row.remoteId, remoteId);
     });
 
+    test('text emptied before a resume is emptied on the server too',
+        () async {
+      final remoteId = await textUploadedInkFailed();
+      final row = (await local.exportAllData()).notes.single;
+      await local.updateNoteContent(row.id, '');
+      await local.replaceStrokesForNote(row.id, const []);
+
+      await sync.pushLocal();
+
+      expect(fakeApi.savedText[remoteId], '');
+      expect(fakeApi.savedInk[remoteId], isEmpty);
+      expect(copyTitles(), isEmpty);
+    });
+
     test('repeated failed resumes never make more than one copy', () async {
       final remoteId = await textUploadedInkFailed();
       fakeApi.editOnServer(remoteId, text: 'edited online');

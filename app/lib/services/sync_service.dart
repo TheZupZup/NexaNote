@@ -126,7 +126,7 @@ class SyncService {
           // fails too, the next push resumes into it (same proof rules)
           // instead of leaving it empty and creating another one.
           await _local.setNoteRemoteId(note.id, copy.id, copy.updatedAt);
-          await _uploadContent(note, copy.id);
+          await _uploadContent(note, copy.id, intoFreshNote: true);
           await _local.markNoteSyncedIfUnchanged(note.id, note.updatedAt);
           notes++;
           continue;
@@ -146,8 +146,10 @@ class SyncService {
         target = created.id;
         await _local.setNoteRemoteId(note.id, target, created.updatedAt);
         notes++;
+        await _uploadContent(note, target, intoFreshNote: true);
+      } else {
+        await _uploadContent(note, target, intoFreshNote: false);
       }
-      await _uploadContent(note, target);
       await _local.markNoteSyncedIfUnchanged(note.id, note.updatedAt);
     }
     return PushCounts(notebooks: notebooks, notes: notes);
@@ -158,13 +160,21 @@ class SyncService {
   /// next write fails, a resume can still tell "only our own writes since"
   /// apart from "changed by someone else" (and not make an offline copy of
   /// a note that is just half uploaded).
-  Future<void> _uploadContent(Note note, String remoteId) async {
-    if (note.typedContent.isNotEmpty) {
+  ///
+  /// Empty parts are skipped only [intoFreshNote]: a resumed upload may
+  /// already have put text or strokes there that the user has removed
+  /// since.
+  Future<void> _uploadContent(
+    Note note,
+    String remoteId, {
+    required bool intoFreshNote,
+  }) async {
+    if (note.typedContent.isNotEmpty || !intoFreshNote) {
       final version = await _api.savePageText(remoteId, 1, note.typedContent);
       await _local.setNoteRemoteId(note.id, remoteId, version);
     }
     final strokes = await _local.getStrokesForNote(note.id);
-    if (strokes.isNotEmpty) {
+    if (strokes.isNotEmpty || !intoFreshNote) {
       final version = await _api.savePageInk(
           remoteId, 1, strokes.map(inkJsonFromStroke).toList());
       await _local.setNoteRemoteId(note.id, remoteId, version);
