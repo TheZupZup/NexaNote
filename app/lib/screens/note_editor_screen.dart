@@ -110,18 +110,21 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
   Future<bool> _persist() {
     final title = _titleCtrl.text;
     final content = _contentCtrl.text;
+    // Taken with the snapshot, not when the save gets to run: an edit made
+    // while this save waits in the queue is not in the snapshot and must
+    // keep the note marked unsaved.
+    final generation = _editGeneration;
     final previous = _textSaves;
-    final save = previous.then((_) => _persistSnapshot(title, content));
+    final save =
+        previous.then((_) => _persistSnapshot(title, content, generation));
     _textSaves = save;
     return save;
   }
 
-  Future<bool> _persistSnapshot(String title, String content) async {
+  Future<bool> _persistSnapshot(
+      String title, String content, int generation) async {
     final state = _appState;
     if (state == null) return false;
-    // Edits made after this point are newer than the snapshot and keep the
-    // note marked unsaved.
-    final generation = _editGeneration;
     try {
       if (title != _savedTitle) {
         await state.updateNoteTitle(_note.id, title);

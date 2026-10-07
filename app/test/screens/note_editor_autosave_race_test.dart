@@ -17,6 +17,19 @@ class _SlowSaveApi extends api.ApiClient {
   final pending = <Completer<void>>[];
   final started = <String>[];
   final landed = <String>[];
+  final titles = <String>[];
+
+  @override
+  Future<api.Note> updateNote(String id,
+      {String? title, bool? isPinned, List<String>? tags}) async {
+    titles.add(title!);
+    return _note();
+  }
+
+  @override
+  Future<List<api.Note>> getNotes(
+          {String? notebookId, String? search, bool includeDeleted = false}) async =>
+      [];
 
   @override
   Future<void> savePageText(String noteId, int pageNum, String content) async {
@@ -157,4 +170,26 @@ void main() {
       expect(backend.landed, ['typed just before switching apps']);
     });
   }
+
+  testWidgets('an edit made while a save waits in the queue is saved too',
+      (tester) async {
+    await pumpEditor(tester);
+    final title = find.byWidgetPredicate(
+        (w) => w is TextField && w.decoration?.hintText == 'Untitled');
+
+    await tester.enterText(body(), 'a');
+    await tester.pump(const Duration(seconds: 2)); // save A in flight
+    await tester.enterText(body(), 'ab');
+    await tester.pump(const Duration(seconds: 2)); // save B queued behind A
+    await tester.enterText(title, 'New title'); // edited while B waits
+    await tester.pump();
+
+    await releaseAll(tester); // A then B land
+    await tester.pump(const Duration(seconds: 3)); // title debounce
+    await tester.pumpWidget(const SizedBox());
+    await releaseAll(tester);
+
+    expect(backend.landed.last, 'ab');
+    expect(backend.titles, contains('New title'));
+  });
 }
