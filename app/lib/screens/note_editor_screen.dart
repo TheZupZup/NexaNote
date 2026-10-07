@@ -38,6 +38,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
   /// failed save so the same snapshot can be retried; only a newer drawing
   /// replaces it.
   List<Map<String, dynamic>>? _pendingInk;
+  int? _pendingInkTicket;
 
   /// The single ink writer while it runs; see [_flushInk].
   Future<void>? _inkWriter;
@@ -103,7 +104,17 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     } catch (_) {
       _appState = null;
     }
+    // A drawing of this note that an earlier editor couldn't save yet is
+    // newer than the stored copy we were opened with: show it and take
+    // over saving it.
+    final unsaved = _appState?.unsavedInk(_note.id);
+    if (!_adoptedUnsavedInk && unsaved != null) {
+      _adoptedUnsavedInk = true;
+      _saveInk(unsaved);
+    }
   }
+
+  bool _adoptedUnsavedInk = false;
 
   void _onChanged() {
     _editGeneration++;
@@ -194,6 +205,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     // mode toggle) never drops what the user just drew.
     _inkStrokes = strokes;
     _pendingInk = strokes;
+    _pendingInkTicket = _appState?.stageInk(_note.id, strokes);
     _inkRetries = 0;
     return _flushInk();
   }
@@ -213,9 +225,10 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     if (state == null) return;
     while (_pendingInk != null) {
       final next = _pendingInk!;
+      final ticket = _pendingInkTicket;
       _pendingInk = null;
       try {
-        await state.savePageInk(_note.id, 1, next);
+        await state.savePageInk(_note.id, 1, next, ticket: ticket);
         _inkSaveFailed = false;
         _inkRetries = 0;
       } catch (e) {

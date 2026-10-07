@@ -63,6 +63,9 @@ class AppState extends ChangeNotifier {
   int _notesRequest = 0;
   int _openRequest = 0;
   Future<void>? _localUpload;
+  final _stagedInk =
+      <String, ({int ticket, List<Map<String, dynamic>> strokes})>{};
+  int _inkTickets = 0;
   bool _isSyncing = false;
   String? _syncMessage;
   String? _syncError;
@@ -653,7 +656,38 @@ class AppState extends ChangeNotifier {
   ///
   /// [strokes] is the editor's wire shape (`{id,color,width,tool,points:[…]}`),
   /// the same payload the backend already accepts.
+  ///
+  /// With a [ticket] from [stageInk], the save is skipped when a newer
+  /// drawing of the same note has been staged since: retries of an older
+  /// snapshot (for instance from an editor that was closed) can never land
+  /// after a newer one.
   Future<void> savePageInk(
+    String noteId,
+    int pageNum,
+    List<Map<String, dynamic>> strokes, {
+    int? ticket,
+  }) async {
+    if (ticket != null && _stagedInk[noteId]?.ticket != ticket) return;
+    await _writePageInk(noteId, pageNum, strokes);
+    if (ticket != null && _stagedInk[noteId]?.ticket == ticket) {
+      _stagedInk.remove(noteId);
+    }
+  }
+
+  /// Records [strokes] as the newest drawing of [noteId] until it is saved,
+  /// and returns the ticket to pass to [savePageInk].
+  int stageInk(String noteId, List<Map<String, dynamic>> strokes) {
+    final ticket = ++_inkTickets;
+    _stagedInk[noteId] = (ticket: ticket, strokes: strokes);
+    return ticket;
+  }
+
+  /// The newest drawing of [noteId] that has not been saved yet, if any. A
+  /// reopened editor starts from it rather than from the older stored copy.
+  List<Map<String, dynamic>>? unsavedInk(String noteId) =>
+      _stagedInk[noteId]?.strokes;
+
+  Future<void> _writePageInk(
     String noteId,
     int pageNum,
     List<Map<String, dynamic>> strokes,

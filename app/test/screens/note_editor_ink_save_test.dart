@@ -226,4 +226,42 @@ void main() {
 
     expect(response, AppExitResponse.exit);
   });
+
+  testWidgets('reopening a note shows and takes over its unsaved drawing',
+      (tester) async {
+    await pumpEditor(tester);
+    backend.down = true;
+    await drawStroke(tester);
+    expect(backend.persisted, isEmpty);
+
+    // Leave and reopen the note: the server copy has no strokes yet.
+    await tester.pumpWidget(const SizedBox());
+    await pumpEditor(tester);
+    final canvas = tester.widget<InkCanvas>(find.byType(InkCanvas));
+    expect(canvas.initialStrokes, hasLength(1));
+
+    backend.down = false;
+    await tester.pump(const Duration(minutes: 3));
+    expect(backend.persisted, isNotEmpty);
+    expect(backend.persisted.last, 1);
+  });
+
+  testWidgets('a closed editor\'s retry never overwrites a newer drawing',
+      (tester) async {
+    await pumpEditor(tester);
+    backend.down = true;
+    await drawStroke(tester); // 1 stroke, save failed, retry scheduled
+
+    await tester.pumpWidget(const SizedBox());
+    await pumpEditor(tester); // reopened: starts from the unsaved stroke
+    backend.down = false;
+    await drawStroke(tester); // 2 strokes, saved
+    expect(backend.persisted.last, 2);
+
+    // The first editor's retry timers are still around; none of them may
+    // put the 1-stroke drawing back.
+    await tester.pump(const Duration(minutes: 5));
+    expect(backend.persisted.last, 2);
+    expect(backend.persisted.where((n) => n < 2), isEmpty);
+  });
 }
