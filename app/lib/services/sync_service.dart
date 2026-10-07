@@ -269,30 +269,28 @@ class SyncService {
           localByRemoteId[r.id] ??
           (derivedPath != null ? localByRemotePath[derivedPath] : null);
       if (existing != null) {
-        // Same identity on both sides — newer timestamp wins, but a local
-        // 'modified' row beats an older or equal-time remote so user edits
-        // aren't clobbered before the next push round.
-        final remoteUpdated = _parseUtc(r.updatedAt);
-        // A local_only row with a remoteId was created by our own push and
-        // still has content to upload; adopting the remote copy now would
-        // mark it synced and the upload would never be retried.
-        final keepLocal = existing.syncStatus == 'local_only' ||
-            (existing.syncStatus == 'modified' &&
-                existing.updatedAt.isAfter(remoteUpdated));
-        if (keepLocal) continue;
-        await _local.upsertNote(existing.copyWith(
-          notebookId: r.notebookId,
-          clearNotebookId: r.notebookId == null,
-          title: cleanedRemoteTitle,
-          noteType: r.noteType,
-          tags: r.tags,
-          isPinned: r.isPinned,
-          isDeleted: r.isDeleted,
-          syncStatus: 'synced',
-          remoteId: r.id,
-          remotePath: derivedPath ?? existing.remotePath,
-          updatedAt: remoteUpdated,
-        ));
+        // Same identity on both sides: newer timestamp wins, but a local
+        // edit the server doesn't have yet is never clobbered. A local_only
+        // row with a remoteId was created by our own push and still has
+        // content to upload; adopting the remote copy now would mark it
+        // synced and the upload would never be retried. Decided against the
+        // row as it is when written, since the editor may be saving into it
+        // while this pull runs.
+        await _local.applyPulledNote(
+          existing.id,
+          existing.copyWith(
+            notebookId: r.notebookId,
+            clearNotebookId: r.notebookId == null,
+            title: cleanedRemoteTitle,
+            noteType: r.noteType,
+            tags: r.tags,
+            isPinned: r.isPinned,
+            isDeleted: r.isDeleted,
+            remoteId: r.id,
+            remotePath: derivedPath ?? existing.remotePath,
+            updatedAt: _parseUtc(r.updatedAt),
+          ),
+        );
         continue;
       }
 
@@ -302,13 +300,10 @@ class SyncService {
       final titleClash =
           localTitleIndex[cleanedRemoteTitle.toLowerCase()];
       if (titleClash != null && titleClash.remoteId == null) {
-        await _local.upsertNote(titleClash.copyWith(
-          syncStatus: 'conflict',
-          updatedAt: titleClash.updatedAt,
-        ));
+        await _local.markNoteConflict(titleClash.id);
       }
 
-      await _local.upsertNote(_toLocalNote(
+      await _local.insertNoteIfAbsent(_toLocalNote(
         r,
         cleanedTitle: cleanedRemoteTitle,
         derivedPath: derivedPath,
@@ -328,7 +323,7 @@ class SyncService {
       // Drop only fully-synced rows. Local-only / modified / conflict
       // rows are preserved; the next push promotes them upstream.
       if (localNote.syncStatus == 'synced') {
-        await _local.hardDeleteNote(localNote.id);
+        await _local.hardDeleteNoteIfSynced(localNote.id);
       }
     }
 

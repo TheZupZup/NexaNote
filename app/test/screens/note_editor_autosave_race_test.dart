@@ -9,6 +9,8 @@ import 'package:nexanote/screens/note_editor_screen.dart';
 import 'package:nexanote/services/api_client.dart' as api;
 import 'package:nexanote/services/app_state.dart';
 
+import '../helpers/test_store.dart';
+
 /// Backend whose text saves only complete when the test says so, so we can
 /// type while a save is in flight and complete saves out of order.
 class _SlowSaveApi extends api.ApiClient {
@@ -63,11 +65,13 @@ void main() {
   late _SlowSaveApi backend;
   late AppState state;
 
-  setUp(() {
+  setUp(() async {
     SharedPreferences.setMockInitialValues({});
     backend = _SlowSaveApi();
-    // Not in local mode: saves go through the (slow) backend.
-    state = AppState(clientFactory: (_) => backend);
+    // Not in local mode: saves go through the (slow) backend, after being
+    // recorded in the local store.
+    state = AppState(
+        localService: await openTestStore(), clientFactory: (_) => backend);
   });
 
   Finder body() => find.byWidgetPredicate(

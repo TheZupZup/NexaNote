@@ -34,22 +34,27 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
   late String _savedTitle;
   late String _savedContent;
 
-  /// The newest complete drawing not yet confirmed saved. Stays set after a
-  /// failed save so the same snapshot can be retried; only a newer drawing
-  /// replaces it.
+  /// The newest complete drawing not yet written to the local store. Stays
+  /// set after a failed write so the same snapshot can be retried; only a
+  /// newer drawing replaces it.
   List<Map<String, dynamic>>? _pendingInk;
   int? _pendingInkTicket;
 
-  /// The single ink writer while it runs; see [_flushInk].
+  /// The single local ink writer while it runs; see [_flushInk].
   Future<void>? _inkWriter;
-  Timer? _inkRetryTimer;
-  int _inkRetries = 0;
+
+  /// The latest request to send this note's saved edits to the backend.
+  Future<void>? _lastPush;
+  bool _pushFailed = false;
+
+  Timer? _retryTimer;
+  int _retries = 0;
   bool _disposed = false;
 
-  /// Backoff between automatic retries of a failed ink save. While the editor
-  /// is open the last delay repeats; once it is closed, retries stop after
-  /// going through the list once.
-  static const _inkRetryDelays = [
+  /// Backoff between automatic retries of a failed ink write or backend
+  /// push. While the editor is open the last delay repeats; once it is
+  /// closed, retries stop after going through the list once.
+  static const _retryDelays = [
     Duration(seconds: 2),
     Duration(seconds: 5),
     Duration(seconds: 15),
@@ -107,6 +112,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     // A drawing of this note that an earlier editor couldn't save yet is
     // newer than the stored copy we were opened with: show it and take
     // over saving it.
+    _appState?.rememberNote(widget.note);
     final unsaved = _appState?.unsavedInk(_note.id);
     if (!_adoptedUnsavedInk && unsaved != null) {
       _adoptedUnsavedInk = true;
@@ -156,23 +162,24 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     return save;
   }
 
+  /// Writes the snapshot to the local store only, so a backend that hangs
+  /// never holds up the next save; [_pushEdits] then sends it on.
   Future<bool> _persistSnapshot(
       String title, String content, int generation) async {
     final state = _appState;
     if (state == null) return false;
     try {
       if (title != _savedTitle) {
-        await state.updateNoteTitle(_note.id, title);
+        await state.recordTitle(_note.id, title);
         _savedTitle = title;
       }
       if (content != _savedContent) {
-        await state.savePageText(_note.id, 1, content);
+        await state.recordText(_note.id, content);
         _savedContent = content;
       }
       if (generation == _editGeneration && mounted) {
         setState(() => _hasChanges = false);
       }
-      return true;
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
@@ -180,6 +187,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
       }
       return false;
     }
+    _pushEdits();
+    return true;
   }
 
   Future<void> _flushTextBeforeModeSwitch() async {
@@ -206,31 +215,33 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     _inkStrokes = strokes;
     _pendingInk = strokes;
     _pendingInkTicket = _appState?.stageInk(_note.id, strokes);
-    _inkRetries = 0;
+    _retries = 0;
     return _flushInk();
   }
 
-  /// Starts the ink writer unless it is already running, and completes when
-  /// it goes idle. Each save sends the whole drawing, so only the newest
-  /// snapshot matters; a single writer means saves can't land out of order
-  /// and put an older drawing back.
+  /// Starts the local ink writer unless it is already running, and
+  /// completes when it goes idle. Each write stores the whole drawing, so
+  /// only the newest snapshot matters; a single writer means writes can't
+  /// land out of order and put an older drawing back.
   Future<void> _flushInk() {
-    _inkRetryTimer?.cancel();
-    _inkRetryTimer = null;
+    _retryTimer?.cancel();
+    _retryTimer = null;
     return _inkWriter ??= _drainInk().whenComplete(() => _inkWriter = null);
   }
 
   Future<void> _drainInk() async {
     final state = _appState;
     if (state == null) return;
+    var wrote = false;
     while (_pendingInk != null) {
       final next = _pendingInk!;
       final ticket = _pendingInkTicket;
       _pendingInk = null;
       try {
-        await state.savePageInk(_note.id, 1, next, ticket: ticket);
+        await state.recordInk(_note.id, next, ticket: ticket);
         _inkSaveFailed = false;
-        _inkRetries = 0;
+        _retries = 0;
+        wrote = true;
       } catch (e) {
         debugPrint('Ink save error: $e');
         // Keep this snapshot pending unless a newer drawing arrived while it
@@ -247,21 +258,62 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                   'Could not save drawing — it stays on screen and will be retried.'),
               backgroundColor: Colors.red));
         }
-        _scheduleInkRetry();
+        _scheduleRetry();
         return;
       }
     }
+    if (wrote) _pushEdits();
   }
 
-  void _scheduleInkRetry() {
-    if (_disposed && _inkRetries >= _inkRetryDelays.length) {
-      debugPrint('Giving up retrying the ink save for note ${_note.id}');
+  /// Sends the edits saved in the local store to the backend (a no-op in
+  /// local mode). The edits are already safe on the device, so a failure
+  /// only means they reach the server later: it is reported once and
+  /// retried with backoff. The returned future never fails.
+  Future<void> _pushEdits() {
+    final state = _appState;
+    if (state == null) return Future.value();
+    final push = state.pushPending(_note.id);
+    _lastPush = push;
+    return push.then((_) {
+      if (!identical(_lastPush, push)) return;
+      _pushFailed = false;
+      _retries = 0;
+      if (_pendingInk == null) {
+        _retryTimer?.cancel();
+        _retryTimer = null;
+      }
+    }, onError: (Object e) {
+      debugPrint('Backend save error for note ${_note.id}: $e');
+      // A newer push was requested meanwhile; it reports its own outcome.
+      if (!identical(_lastPush, push)) return;
+      if (mounted && !_pushFailed) {
+        _pushFailed = true;
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text('Saved on this device. It will be sent to the '
+                'server once it can be reached.')));
+      }
+      _scheduleRetry();
+    });
+  }
+
+  void _scheduleRetry() {
+    _retryTimer?.cancel();
+    if (_disposed && _retries >= _retryDelays.length) {
+      debugPrint('Giving up retrying the save of note ${_note.id}');
       return;
     }
-    final delay =
-        _inkRetryDelays[_inkRetries.clamp(0, _inkRetryDelays.length - 1)];
-    _inkRetries++;
-    _inkRetryTimer = Timer(delay, _flushInk);
+    final delay = _retryDelays[_retries.clamp(0, _retryDelays.length - 1)];
+    _retries++;
+    _retryTimer = Timer(delay, _retry);
+  }
+
+  void _retry() {
+    _retryTimer = null;
+    if (_pendingInk != null) {
+      _flushInk();
+    } else {
+      _pushEdits();
+    }
   }
 
   /// The app has no trash view to restore from, so deleting from the editor
@@ -301,31 +353,37 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
   /// Android can kill a backgrounded app without running any more Dart
   /// code, and closing a desktop window doesn't dispose widgets either, so
   /// pending text can't wait for the debounce timer once the app leaves the
-  /// foreground.
+  /// foreground. The local writes are what makes the edits survive; the
+  /// push is a best effort that would otherwise wait for its retry timer,
+  /// which never fires if the backgrounded process is killed.
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) return;
     _saveTimer?.cancel();
     if (_hasChanges) _save();
-    // A drawing whose save failed would otherwise wait for its retry timer,
-    // which never fires if the backgrounded process is killed.
     if (_pendingInk != null) _flushInk();
+    _pushEdits();
   }
 
-  /// Desktop window close: give pending text and ink saves a bounded chance
-  /// to finish before the process exits, without blocking the close on a
-  /// backend that never answers.
+  /// Desktop window close: first let the pending text and ink reach the
+  /// local store, then give the backend push what is left of a bounded
+  /// wait. A backend that never answers can't block the close, and nothing
+  /// is lost by closing anyway: the edits are on disk and pushed on the
+  /// next start.
   @override
   Future<AppExitResponse> didRequestAppExit() async {
     _saveTimer?.cancel();
-    final saves = <Future<void>>[
+    final clock = Stopwatch()..start();
+    final localWrites = <Future<void>>[
       if (_hasChanges) _persist() else _textSaves,
       if (_pendingInk != null || _inkWriter != null) _flushInk(),
     ];
     try {
-      await Future.wait(saves).timeout(_exitSaveTimeout);
+      await Future.wait(localWrites).timeout(_exitSaveTimeout);
+      final left = _exitSaveTimeout - clock.elapsed;
+      if (left > Duration.zero) await _pushEdits().timeout(left);
     } on TimeoutException {
-      debugPrint('Exiting with saves still pending for note ${_note.id}');
+      debugPrint('Exiting before every save of note ${_note.id} finished');
     }
     return AppExitResponse.exit;
   }
@@ -335,9 +393,9 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     _disposed = true;
     WidgetsBinding.instance.removeObserver(this);
     _saveTimer?.cancel();
-    // A failed drawing save keeps retrying (bounded) with the captured
-    // AppState after the editor is gone; start right away rather than
-    // waiting for the backoff.
+    // A failed drawing write or push keeps retrying (bounded) with the
+    // captured AppState after the editor is gone; start right away rather
+    // than waiting for the backoff.
     if (_pendingInk != null) _flushInk();
     // Flush pending text edits. The save is queued behind any in-flight one
     // and only uses the captured AppState, so it is safe after unmount.

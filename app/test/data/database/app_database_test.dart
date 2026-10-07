@@ -2,6 +2,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 import 'package:nexanote/data/database/schema.dart';
+import 'package:nexanote/data/models/note.dart';
 
 void main() {
   setUpAll(() {
@@ -169,6 +170,9 @@ void main() {
       final v2 = await openDatabase(inMemoryDatabasePath,
           version: 1, onCreate: (db, _) => Schema.onCreate(db, 1));
       await v2.execute('ALTER TABLE notes DROP COLUMN remote_baseline');
+      for (final column in Schema.editRevisionColumns) {
+        await v2.execute('ALTER TABLE notes DROP COLUMN $column');
+      }
       final now = DateTime.utc(2024, 1, 1).toIso8601String();
       await v2.insert('notes', {
         'id': 'pending', 'title': 'Pending', 'remote_id': 'srv-1',
@@ -185,6 +189,40 @@ void main() {
       // and keeps both versions rather than writing into the remote note.
       expect(row['remote_baseline'], isNull);
       await v2.close();
+    });
+
+    test(
+        'adds the edit revisions when migrating v3 → v4, keeping rows as '
+        'they were', () async {
+      final v3 = await openDatabase(inMemoryDatabasePath,
+          version: 1, onCreate: (db, _) => Schema.onCreate(db, 1));
+      for (final column in Schema.editRevisionColumns) {
+        await v3.execute('ALTER TABLE notes DROP COLUMN $column');
+      }
+      final now = DateTime.utc(2024, 1, 1).toIso8601String();
+      await v3.insert('notes', {
+        'id': 'n',
+        'title': 'Kept',
+        'typed_content': 'body',
+        'remote_id': 'srv-1',
+        'remote_baseline': now,
+        'sync_status': 'local_only',
+        'created_at': now,
+        'updated_at': now,
+      });
+
+      await Schema.onUpgrade(v3, 3, Schema.version);
+
+      final row = Note.fromMap(
+          (await v3.query('notes', where: 'id = ?', whereArgs: ['n'])).first);
+      expect(row.title, 'Kept');
+      expect(row.typedContent, 'body');
+      expect(row.syncStatus, 'local_only');
+      expect(row.remoteBaseline, now);
+      // Older rows carry no per-part revision: nothing looks pending, and
+      // what they still have to upload stays with pushLocal via local_only.
+      expect(row.hasPendingEdits, isFalse);
+      await v3.close();
     });
   });
 }

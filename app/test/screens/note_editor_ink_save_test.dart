@@ -11,6 +11,8 @@ import 'package:nexanote/services/api_client.dart' as api;
 import 'package:nexanote/services/app_state.dart';
 import 'package:nexanote/widgets/ink_canvas.dart';
 
+import '../helpers/test_store.dart';
+
 /// Backend whose ink saves can be held open and failed on demand.
 class _InkApi extends api.ApiClient {
   _InkApi() : super(baseUrl: 'http://ink.test');
@@ -69,10 +71,11 @@ void main() {
   late _InkApi backend;
   late AppState state;
 
-  setUp(() {
+  setUp(() async {
     SharedPreferences.setMockInitialValues({});
     backend = _InkApi();
-    state = AppState(clientFactory: (_) => backend);
+    state = AppState(
+        localService: await openTestStore(), clientFactory: (_) => backend);
   });
 
   Future<void> pumpEditor(WidgetTester tester) async {
