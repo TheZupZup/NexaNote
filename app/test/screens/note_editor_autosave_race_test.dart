@@ -32,12 +32,14 @@ class _SlowSaveApi extends api.ApiClient {
       [];
 
   @override
-  Future<void> savePageText(String noteId, int pageNum, String content) async {
+  Future<String?> savePageText(
+      String noteId, int pageNum, String content) async {
     started.add(content);
     final gate = Completer<void>();
     pending.add(gate);
     await gate.future;
     landed.add(content);
+    return null;
   }
 }
 

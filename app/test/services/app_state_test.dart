@@ -84,8 +84,10 @@ class _FlakyUploadApi extends _StubApi {
   }
 
   @override
-  Future<void> savePageText(String noteId, int pageNum, String content) async {
+  Future<String?> savePageText(
+      String noteId, int pageNum, String content) async {
     savedText[noteId] = content;
+    return null;
   }
 }
 

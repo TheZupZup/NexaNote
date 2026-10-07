@@ -35,7 +35,7 @@ class _InkApi extends api.ApiClient {
   static const _error = api.ApiException('Failed to save drawing', statusCode: 503);
 
   @override
-  Future<void> savePageInk(
+  Future<String?> savePageInk(
       String noteId, int pageNum, List<Map<String, dynamic>> strokes) async {
     attempts.add(strokes.length);
     if (hold) {
@@ -45,6 +45,7 @@ class _InkApi extends api.ApiClient {
     }
     if (down) throw _error;
     persisted.add(strokes.length);
+    return null;
   }
 }
 

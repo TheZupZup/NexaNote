@@ -110,15 +110,15 @@ class SyncService {
       var target = hasRemote ? remoteId : null;
       if (target != null) {
         // Resuming an upload interrupted after the create. Only write into
-        // that remote note if it is provably still the empty one we created;
-        // anything else (edited online, even emptied on purpose, or a state
-        // we can't compare) keeps both versions.
+        // that remote note if it is provably still exactly as our last write
+        // left it; anything else (edited online, even emptied on purpose, or
+        // a state we can't compare) keeps both versions.
         final server = await _remoteNoteOrNull(target);
         if (server == null) {
           target = null; // deleted on the server meanwhile: create it again
-        } else if (!_isUntouchedSinceCreate(server, note.remoteBaseline)) {
+        } else if (!_isAsWeLeftIt(server, note.remoteBaseline)) {
           final copy = await _api.createNote(
-            title: '${cleanRemoteTitle(note.title)} (offline copy)',
+            title: _offlineCopyTitle(note.title),
             noteType: note.noteType,
             notebookId: server.notebookId,
           );
@@ -153,15 +153,31 @@ class SyncService {
     return PushCounts(notebooks: notebooks, notes: notes);
   }
 
+  /// Uploads the note's text and drawing into [remoteId]. After each write
+  /// the version the server reports becomes the row's baseline, so if the
+  /// next write fails, a resume can still tell "only our own writes since"
+  /// apart from "changed by someone else" (and not make an offline copy of
+  /// a note that is just half uploaded).
   Future<void> _uploadContent(Note note, String remoteId) async {
     if (note.typedContent.isNotEmpty) {
-      await _api.savePageText(remoteId, 1, note.typedContent);
+      final version = await _api.savePageText(remoteId, 1, note.typedContent);
+      await _local.setNoteRemoteId(note.id, remoteId, version);
     }
     final strokes = await _local.getStrokesForNote(note.id);
     if (strokes.isNotEmpty) {
-      await _api.savePageInk(
+      final version = await _api.savePageInk(
           remoteId, 1, strokes.map(inkJsonFromStroke).toList());
+      await _local.setNoteRemoteId(note.id, remoteId, version);
     }
+  }
+
+  static const _offlineCopySuffix = ' (offline copy)';
+
+  static String _offlineCopyTitle(String title) {
+    final clean = cleanRemoteTitle(title);
+    return clean.endsWith(_offlineCopySuffix)
+        ? clean
+        : '$clean$_offlineCopySuffix';
   }
 
   Future<api.Note?> _remoteNoteOrNull(String id) async {
@@ -173,18 +189,16 @@ class SyncService {
     }
   }
 
-  /// True only when [server] is still exactly the note our push created:
-  /// same updated_at as recorded at create time ([baseline]) and no content.
-  /// Every server-side write moves updated_at, so an emptied note or a note
-  /// edited and reverted does not pass. Without a comparable baseline there
-  /// is no proof, so this is false.
-  static bool _isUntouchedSinceCreate(api.Note server, String? baseline) {
-    final created = baseline == null ? null : DateTime.tryParse(baseline);
+  /// True only when [server] is still exactly as our push left it: its
+  /// updated_at is the one recorded after our create or our last content
+  /// write ([baseline]). Every server-side write moves updated_at, so a note
+  /// edited elsewhere, emptied, or edited and reverted does not pass.
+  /// Without a comparable baseline there is no proof, so this is false.
+  static bool _isAsWeLeftIt(api.Note server, String? baseline) {
+    final ours = baseline == null ? null : DateTime.tryParse(baseline);
     final current = DateTime.tryParse(server.updatedAt);
-    if (created == null || current == null) return false;
-    if (!current.isAtSameMomentAs(created)) return false;
-    return !(server.pages ?? const []).any(
-        (p) => p.typedContent.isNotEmpty || p.strokes.isNotEmpty);
+    if (ours == null || current == null) return false;
+    return current.isAtSameMomentAs(ours);
   }
 
   static bool _isAlreadySynced(String status) => status == 'synced';

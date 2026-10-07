@@ -75,7 +75,10 @@ void main() {
       httpClient: MockClient((_) => Completer<http.Response>().future),
     );
     Object? error;
-    client.savePageInk('n', 1, const []).catchError((Object e) => error = e);
+    client.savePageInk('n', 1, const []).catchError((Object e) {
+      error = e;
+      return null;
+    });
 
     // Still uploading well past the normal request timeout...
     await tester.pump(ApiClient.requestTimeout * 2);

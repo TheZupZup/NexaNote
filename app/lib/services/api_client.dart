@@ -335,7 +335,10 @@ class ApiClient {
   // Page text content
   // ----------------------------------------------------------------
 
-  Future<void> savePageText(String noteId, int pageNum, String content) async {
+  /// Saves page text and returns the note's updated_at after the write, as
+  /// the server reports it (null when it doesn't).
+  Future<String?> savePageText(
+      String noteId, int pageNum, String content) async {
     const what = 'Failed to save text';
     final resp = await _send(
         what,
@@ -346,9 +349,12 @@ class ApiClient {
             ),
         timeout: uploadTimeout);
     _expect(resp, what);
+    return _noteVersion(resp);
   }
 
-  Future<void> savePageInk(
+  /// Saves a page's drawing; returns the note's updated_at like
+  /// [savePageText].
+  Future<String?> savePageInk(
       String noteId, int pageNum, List<Map<String, dynamic>> strokes) async {
     const what = 'Failed to save drawing';
     final resp = await _send(
@@ -360,6 +366,17 @@ class ApiClient {
             ),
         timeout: uploadTimeout);
     _expect(resp, what);
+    return _noteVersion(resp);
+  }
+
+  static String? _noteVersion(http.Response resp) {
+    try {
+      final body = jsonDecode(resp.body);
+      final version = body is Map ? body['note_updated_at'] : null;
+      return version is String && version.isNotEmpty ? version : null;
+    } on FormatException {
+      return null;
+    }
   }
 
   // ----------------------------------------------------------------

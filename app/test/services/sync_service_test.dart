@@ -22,8 +22,12 @@ class FakeApiClient extends api.ApiClient {
   bool failText = false;
   bool failInk = false;
 
+  /// Whether page saves report the note's new updated_at, like the current
+  /// backend does. Older servers don't.
+  bool reportsVersion = true;
+
   /// Like the real backend, every write to a note moves its updated_at.
-  void _touch(String noteId) {
+  String? _touch(String noteId) {
     remoteNotes = [
       for (final n in remoteNotes)
         n.id == noteId
@@ -33,6 +37,8 @@ class FakeApiClient extends api.ApiClient {
                     .toIso8601String())
             : n,
     ];
+    if (!reportsVersion) return null;
+    return remoteNotes.where((n) => n.id == noteId).firstOrNull?.updatedAt;
   }
 
   /// Someone edits the note on the server (another device, the web UI).
@@ -42,10 +48,11 @@ class FakeApiClient extends api.ApiClient {
   }
 
   @override
-  Future<void> savePageText(String noteId, int pageNum, String content) async {
+  Future<String?> savePageText(
+      String noteId, int pageNum, String content) async {
     if (failText) throw const api.ApiException('Failed to save text');
     savedText[noteId] = content;
-    _touch(noteId);
+    return _touch(noteId);
   }
 
   @override
@@ -65,11 +72,11 @@ class FakeApiClient extends api.ApiClient {
   }
 
   @override
-  Future<void> savePageInk(
+  Future<String?> savePageInk(
       String noteId, int pageNum, List<Map<String, dynamic>> strokes) async {
     if (failInk) throw const api.ApiException('Failed to save drawing');
     savedInk[noteId] = strokes;
-    _touch(noteId);
+    return _touch(noteId);
   }
 
   @override
@@ -333,8 +340,7 @@ void main() {
       expect(fakeApi.savedText['remote-note-2'], 'written offline');
     });
 
-    test('a partly uploaded note is not resumed over its own remote copy',
-        () async {
+    Future<String> textUploadedInkFailed() async {
       final note = await local.createNote('Sketch', noteType: 'mixed');
       await local.updateNoteContent(note.id, 'caption');
       await local.replaceStrokesForNote(note.id, [
@@ -345,21 +351,102 @@ void main() {
           points: const [StrokePoint(x: 1, y: 2), StrokePoint(x: 3, y: 4)],
         ),
       ]);
-      // Text upload succeeds, the drawing upload fails.
       fakeApi.failInk = true;
       await expectLater(sync.pushLocal(), throwsA(isA<api.ApiException>()));
       fakeApi.failInk = false;
       final remoteId = fakeApi.remoteNotes.single.id;
       expect(fakeApi.savedText[remoteId], 'caption');
+      return remoteId;
+    }
+
+    Iterable<String> copyTitles() => fakeApi.createdNotes
+        .map((n) => n['title'] as String)
+        .where((t) => t.contains('(offline copy)'));
+
+    test('a partly uploaded note resumes into the same remote note',
+        () async {
+      final remoteId = await textUploadedInkFailed();
 
       await sync.pushLocal();
 
-      // The remote changed since the create (our own text write is
-      // indistinguishable from someone else's), so nothing is overwritten
-      // and the complete local version is kept as a copy.
+      // Only our own text write happened since the create, so the upload
+      // just finishes there: no copy.
+      expect(fakeApi.createdNotes, hasLength(1));
+      expect(copyTitles(), isEmpty);
       expect(fakeApi.savedText[remoteId], 'caption');
+      expect(fakeApi.savedInk[remoteId], hasLength(1));
+      final row = (await local.exportAllData()).notes.single;
+      expect(row.syncStatus, 'synced');
+      expect(row.remoteId, remoteId);
+    });
+
+    test('repeated failed resumes never make more than one copy', () async {
+      final remoteId = await textUploadedInkFailed();
+      fakeApi.editOnServer(remoteId, text: 'edited online');
+
+      // The copy's text goes up, its drawing keeps failing.
+      fakeApi.failInk = true;
+      for (var i = 0; i < 3; i++) {
+        await expectLater(sync.pushLocal(), throwsA(isA<api.ApiException>()));
+      }
+      fakeApi.failInk = false;
+      await sync.pushLocal();
+      await sync.pushLocal();
+
+      expect(fakeApi.createdNotes, hasLength(2));
+      expect(copyTitles(), ['Sketch (offline copy)']);
       expect(fakeApi.savedText['remote-note-2'], 'caption');
       expect(fakeApi.savedInk['remote-note-2'], hasLength(1));
+      expect(fakeApi.savedText[remoteId], 'edited online');
+    });
+
+    test('an edit made online between our writes is kept, not overwritten',
+        () async {
+      final remoteId = await textUploadedInkFailed();
+      // After our text went up, someone edits the note on the server.
+      fakeApi.editOnServer(remoteId, text: 'changed on the web');
+
+      await sync.pushLocal();
+
+      expect(fakeApi.savedText[remoteId], 'changed on the web');
+      expect(fakeApi.savedInk[remoteId], isNull);
+      expect(copyTitles(), ['Sketch (offline copy)']);
+      expect(fakeApi.savedText['remote-note-2'], 'caption');
+      expect(fakeApi.savedInk['remote-note-2'], hasLength(1));
+    });
+
+    test('a resume makes a copy when the server reports no version',
+        () async {
+      fakeApi.reportsVersion = false;
+      final remoteId = await textUploadedInkFailed();
+
+      await sync.pushLocal();
+
+      // Without a version there is no proof the text write was the only
+      // change, so the original stays as is and a copy takes everything.
+      expect(fakeApi.savedInk[remoteId], isNull);
+      expect(copyTitles(), ['Sketch (offline copy)']);
+      expect(fakeApi.savedInk['remote-note-2'], hasLength(1));
+    });
+
+    test('offline copy titles never stack the suffix', () async {
+      final note = await local.createNote('Plan (offline copy)');
+      await local.updateNoteContent(note.id, 'v2');
+      fakeApi.failText = true;
+      await expectLater(sync.pushLocal(), throwsA(isA<api.ApiException>()));
+      final remoteId = fakeApi.remoteNotes.single.id;
+      fakeApi.editOnServer(remoteId, text: 'online');
+      for (var i = 0; i < 3; i++) {
+        await expectLater(sync.pushLocal(), throwsA(isA<api.ApiException>()));
+      }
+      fakeApi.failText = false;
+      await sync.sync();
+      await sync.sync();
+
+      expect(fakeApi.createdNotes.map((n) => n['title']),
+          ['Plan (offline copy)', 'Plan (offline copy)']);
+      expect(fakeApi.createdNotes.map((n) => n['title']),
+          everyElement(isNot(contains('(offline copy) (offline copy)'))));
     });
 
     test('a failed copy upload is resumed into the same copy, not repeated',
