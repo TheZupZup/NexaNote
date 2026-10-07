@@ -170,4 +170,28 @@ void main() {
     expect(await io(tester, () => service.getStrokesForNote(created.id)),
         isNotEmpty);
   });
+
+  testWidgets('deleting from the editor asks for confirmation first',
+      (tester) async {
+    final created = await newNote(tester, 'Keep me', 'typed');
+    await pumpEditor(tester, created);
+
+    Future<bool> isDeleted() => io(tester, () async {
+          return (await service.getNoteById(created.id))!.isDeleted;
+        });
+
+    await tester.tap(find.byTooltip('Delete note'));
+    await tester.pumpAndSettle();
+    expect(find.text('Delete note?'), findsOneWidget);
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
+    await settle(tester);
+    expect(await isDeleted(), isFalse);
+
+    await tester.tap(find.byTooltip('Delete note'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Delete'));
+    await settle(tester);
+    expect(await isDeleted(), isTrue);
+  });
 }

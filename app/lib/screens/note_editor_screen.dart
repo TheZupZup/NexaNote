@@ -197,6 +197,40 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     }
   }
 
+  /// The app has no trash view to restore from, so deleting from the editor
+  /// asks first, like the swipe-to-delete in the notes list.
+  Future<void> _confirmDelete(bool isMobile) async {
+    final scheme = Theme.of(context).colorScheme;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Delete note?'),
+        content: Text('Move "${_titleCtrl.text}" to trash?'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              style: FilledButton.styleFrom(backgroundColor: scheme.error),
+              child: const Text('Delete')),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    final state = context.read<AppState>();
+    try {
+      await state.deleteNote(_note.id);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text('Delete failed: $e'), backgroundColor: Colors.red));
+      }
+      return;
+    }
+    if (isMobile && mounted) Navigator.pop(context);
+  }
+
   @override
   void dispose() {
     _saveTimer?.cancel();
@@ -251,10 +285,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
           onDraw: () {
             _switchToInk();
           },
-          onDelete: () {
-            context.read<AppState>().deleteNote(_note.id);
-            if (isMobile) Navigator.pop(context);
-          },
+          onDelete: () => _confirmDelete(isMobile),
         ),
         // Title
         Padding(
