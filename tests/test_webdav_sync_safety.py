@@ -448,3 +448,20 @@ def test_claiming_with_an_id_that_already_exists_keeps_its_drawing(server):
     assert note.pages[0].typed_content == "new text"
     assert len(note.pages[0].strokes) == 1
     assert note.notebook_id == _uncategorized(sdb).id
+
+
+def test_placeholder_edited_by_a_user_is_not_overwritten_on_claim(server):
+    sdb = server["db"]
+    assert _mkcol(server, "uncategorized/doc__abcd1234").status_code in (200, 201)
+    placeholder = [n for n in sdb.list_notes() if n.id.startswith("abcd1234")][0]
+    # Someone opens the stand-in note in the app and writes in it.
+    note = sdb.get_note(placeholder.id, load_pages=True)
+    note.pages[0].typed_content = "typed into the placeholder"
+    note.touch()
+    sdb.save_note(note)
+
+    resp = _put_meta(server, "uncategorized/doc__abcd1234", CLIENT_ID, text="client text")
+
+    assert resp.status_code == 409
+    kept = sdb.get_note(placeholder.id, load_pages=True)
+    assert kept.pages[0].typed_content == "typed into the placeholder"

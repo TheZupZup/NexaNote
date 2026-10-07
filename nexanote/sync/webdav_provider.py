@@ -674,8 +674,15 @@ def _is_placeholder_for(db: FileNoteStore, note: Note, payload_id: str) -> bool:
     a PUT into a path that didn't exist yet) for the client note
     `payload_id`. Being empty and sharing the id prefix is not enough: a real
     note can be both.
+
+    The placeholder's text must also still be empty: the claim replaces it
+    with the payload's, so text someone typed into the stand-in (through
+    the app) would be lost. Strokes are allowed (a page_N.ink PUT may land
+    before note.json); the claim keeps them.
     """
-    return note.id[:8] == payload_id[:8] and _placeholders(db).contains(note.id)
+    if note.id[:8] != payload_id[:8] or not _placeholders(db).contains(note.id):
+        return False
+    return all(not p.typed_content for p in note.pages)
 
 
 class _PlaceholderRegistry:
