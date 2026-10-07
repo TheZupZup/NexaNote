@@ -189,8 +189,12 @@ class NoteRepository {
 
   /// Links local note [id] to the note the server created for it, keeping it
   /// pending (`local_only`) until its content has been uploaded too.
-  Future<void> setNoteRemoteId(String id, String remoteId) async {
-    await _db.update('notes', {'remote_id': remoteId},
+  /// [baseline] is the server's updated_at for that fresh note (see
+  /// [Note.remoteBaseline]); null when the server didn't report one.
+  Future<void> setNoteRemoteId(
+      String id, String remoteId, String? baseline) async {
+    await _db.update(
+        'notes', {'remote_id': remoteId, 'remote_baseline': baseline},
         where: 'id = ?', whereArgs: [id]);
   }
 

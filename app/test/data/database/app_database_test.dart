@@ -159,8 +159,32 @@ void main() {
       expect(row['title'], 'Legacy');
       expect(row['remote_id'], isNull);
       expect(row['remote_path'], isNull);
+      expect(row['remote_baseline'], isNull);
 
       await v1.close();
+    });
+
+    test('adds remote_baseline when migrating v2 → v3, keeping pending rows',
+        () async {
+      final v2 = await openDatabase(inMemoryDatabasePath,
+          version: 1, onCreate: (db, _) => Schema.onCreate(db, 1));
+      await v2.execute('ALTER TABLE notes DROP COLUMN remote_baseline');
+      final now = DateTime.utc(2024, 1, 1).toIso8601String();
+      await v2.insert('notes', {
+        'id': 'pending', 'title': 'Pending', 'remote_id': 'srv-1',
+        'sync_status': 'local_only', 'created_at': now, 'updated_at': now,
+      });
+
+      await Schema.onUpgrade(v2, 2, Schema.version);
+
+      final row =
+          (await v2.query('notes', where: 'id = ?', whereArgs: ['pending']))
+              .first;
+      expect(row['remote_id'], 'srv-1');
+      // No baseline recorded by older builds: a resumed upload has no proof
+      // and keeps both versions rather than writing into the remote note.
+      expect(row['remote_baseline'], isNull);
+      await v2.close();
     });
   });
 }

@@ -11,7 +11,11 @@ class Schema {
   /// Bumped to 2 when remote_id/remote_path columns were added so the
   /// SyncService can map a local note to its canonical .md file on the
   /// WebDAV/NAS without inventing a fresh row on every pull.
-  static const int version = 2;
+  ///
+  /// Bumped to 3 for remote_baseline: the server's updated_at when our push
+  /// created a note, so an interrupted upload is only resumed into a remote
+  /// note that provably hasn't changed since.
+  static const int version = 3;
 
   static const String _createNotebooks = '''
     CREATE TABLE IF NOT EXISTS notebooks (
@@ -43,6 +47,7 @@ class Schema {
       sync_status   TEXT NOT NULL DEFAULT 'local_only',
       remote_id     TEXT,
       remote_path   TEXT,
+      remote_baseline TEXT,
       created_at    TEXT NOT NULL,
       updated_at    TEXT NOT NULL,
       FOREIGN KEY (notebook_id) REFERENCES notebooks(id)
@@ -121,6 +126,9 @@ class Schema {
       await db.execute('ALTER TABLE notes ADD COLUMN remote_path TEXT');
       await db.execute(_indexNotesRemoteId);
       await db.execute(_indexNotesRemotePath);
+    }
+    if (oldVersion < 3) {
+      await db.execute('ALTER TABLE notes ADD COLUMN remote_baseline TEXT');
     }
   }
 }

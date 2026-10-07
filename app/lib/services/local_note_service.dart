@@ -67,8 +67,8 @@ class LocalNoteService {
   Future<void> markNoteModified(String id) => _repo.updateNoteFields(id);
 
   // Push bookkeeping used by SyncService.
-  Future<void> setNoteRemoteId(String id, String remoteId) =>
-      _repo.setNoteRemoteId(id, remoteId);
+  Future<void> setNoteRemoteId(String id, String remoteId, String? baseline) =>
+      _repo.setNoteRemoteId(id, remoteId, baseline);
   Future<bool> markNoteSyncedIfUnchanged(String id, DateTime seenUpdatedAt) =>
       _repo.markNoteSyncedIfUnchanged(id, seenUpdatedAt);
   Future<void> adoptRemoteNotebook(String localId, Notebook remote) =>

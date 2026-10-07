@@ -19,6 +19,10 @@ import 'dart:convert';
 /// remote (e.g. `notes/Hello World.md`). Stored so renames on disk can be
 /// followed without losing the link.
 ///
+/// [remoteBaseline] is the server's `updated_at` for the note right after
+/// our push created it. While an upload is pending it is the only proof
+/// that the remote note is still the empty one we created.
+///
 /// Mirrors Note in nexanote/models/note.py.
 class Note {
   final String id;
@@ -33,6 +37,7 @@ class Note {
   final String syncStatus;
   final String? remoteId;
   final String? remotePath;
+  final String? remoteBaseline;
   final DateTime createdAt;
   final DateTime updatedAt;
 
@@ -49,6 +54,7 @@ class Note {
     this.syncStatus = 'local_only',
     this.remoteId,
     this.remotePath,
+    this.remoteBaseline,
     required this.createdAt,
     required this.updatedAt,
   });
@@ -69,6 +75,7 @@ class Note {
       syncStatus: (map['sync_status'] as String?) ?? 'local_only',
       remoteId: map['remote_id'] as String?,
       remotePath: map['remote_path'] as String?,
+      remoteBaseline: map['remote_baseline'] as String?,
       createdAt: DateTime.parse(map['created_at'] as String),
       updatedAt: DateTime.parse(map['updated_at'] as String),
     );
@@ -88,6 +95,7 @@ class Note {
       'sync_status': syncStatus,
       'remote_id': remoteId,
       'remote_path': remotePath,
+      'remote_baseline': remoteBaseline,
       'created_at': createdAt.toIso8601String(),
       'updated_at': updatedAt.toIso8601String(),
     };
@@ -122,6 +130,7 @@ class Note {
       syncStatus: syncStatus ?? this.syncStatus,
       remoteId: remoteId ?? this.remoteId,
       remotePath: remotePath ?? this.remotePath,
+      remoteBaseline: remoteBaseline,
       createdAt: createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
     );

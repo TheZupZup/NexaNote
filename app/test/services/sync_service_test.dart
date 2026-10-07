@@ -21,11 +21,32 @@ class FakeApiClient extends api.ApiClient {
   Map<String, String> savedText = {};
   Map<String, List<Map<String, dynamic>>> savedInk = {};
   bool failText = false;
+  bool failInk = false;
+
+  /// Like the real backend, every write to a note moves its updated_at.
+  void _touch(String noteId) {
+    remoteNotes = [
+      for (final n in remoteNotes)
+        n.id == noteId
+            ? n.copyWith(
+                updatedAt: DateTime.parse(n.updatedAt)
+                    .add(const Duration(seconds: 1))
+                    .toIso8601String())
+            : n,
+    ];
+  }
+
+  /// Someone edits the note on the server (another device, the web UI).
+  void editOnServer(String noteId, {required String text}) {
+    savedText[noteId] = text;
+    _touch(noteId);
+  }
 
   @override
   Future<void> savePageText(String noteId, int pageNum, String content) async {
     if (failText) throw const api.ApiException('Failed to save text');
     savedText[noteId] = content;
+    _touch(noteId);
   }
 
   @override
@@ -47,7 +68,9 @@ class FakeApiClient extends api.ApiClient {
   @override
   Future<void> savePageInk(
       String noteId, int pageNum, List<Map<String, dynamic>> strokes) async {
+    if (failInk) throw const api.ApiException('Failed to save drawing');
     savedInk[noteId] = strokes;
+    _touch(noteId);
   }
 
   @override
@@ -280,10 +303,70 @@ void main() {
       expect(fakeApi.savedText[remoteId], 'written offline');
     });
 
+    test('never overwrites a remote note that was edited and left empty',
+        () async {
+      final remoteId = await interruptedUpload();
+      // Someone opens the note online and saves it empty on purpose.
+      fakeApi.editOnServer(remoteId, text: '');
+
+      await sync.pushLocal();
+
+      // Empty is not proof it is still our untouched placeholder: the
+      // remote edit stays, the offline text goes to a separate copy.
+      expect(fakeApi.savedText[remoteId], '');
+      final copy = fakeApi.createdNotes.last;
+      expect(copy['title'], 'Offline (offline copy)');
+      expect(fakeApi.savedText['remote-note-2'], 'written offline');
+    });
+
+    test('keeps both versions when the remote state cannot be compared',
+        () async {
+      final remoteId = await interruptedUpload();
+      // A server that reports no usable updated_at gives no proof either way.
+      fakeApi.remoteNotes = [
+        for (final n in fakeApi.remoteNotes)
+          n.id == remoteId ? n.copyWith(updatedAt: 'not a date') : n,
+      ];
+
+      await sync.pushLocal();
+
+      expect(fakeApi.savedText[remoteId] ?? '', '');
+      expect(fakeApi.savedText['remote-note-2'], 'written offline');
+    });
+
+    test('a partly uploaded note is not resumed over its own remote copy',
+        () async {
+      final note = await local.createNote('Sketch', noteType: 'mixed');
+      await local.updateNoteContent(note.id, 'caption');
+      await local.replaceStrokesForNote(note.id, [
+        Stroke(
+          id: 's1',
+          noteId: note.id,
+          createdAt: DateTime.utc(2024),
+          points: const [StrokePoint(x: 1, y: 2), StrokePoint(x: 3, y: 4)],
+        ),
+      ]);
+      // Text upload succeeds, the drawing upload fails.
+      fakeApi.failInk = true;
+      await expectLater(sync.pushLocal(), throwsA(isA<api.ApiException>()));
+      fakeApi.failInk = false;
+      final remoteId = fakeApi.remoteNotes.single.id;
+      expect(fakeApi.savedText[remoteId], 'caption');
+
+      await sync.pushLocal();
+
+      // The remote changed since the create (our own text write is
+      // indistinguishable from someone else's), so nothing is overwritten
+      // and the complete local version is kept as a copy.
+      expect(fakeApi.savedText[remoteId], 'caption');
+      expect(fakeApi.savedText['remote-note-2'], 'caption');
+      expect(fakeApi.savedInk['remote-note-2'], hasLength(1));
+    });
+
     test('never overwrites what was written in that note online since',
         () async {
       final remoteId = await interruptedUpload();
-      fakeApi.savedText[remoteId] = 'typed on the server afterwards';
+      fakeApi.editOnServer(remoteId, text: 'typed on the server afterwards');
 
       await sync.sync();
       await sync.sync();

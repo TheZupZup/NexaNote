@@ -109,12 +109,14 @@ class SyncService {
       if (hasRemote && !pendingUpload) continue;
       var target = hasRemote ? remoteId : null;
       if (target != null) {
-        // Resuming an upload interrupted after the create. The user may have
-        // written in that note online since then; never overwrite that.
+        // Resuming an upload interrupted after the create. Only write into
+        // that remote note if it is provably still the empty one we created;
+        // anything else (edited online, even emptied on purpose, or a state
+        // we can't compare) keeps both versions.
         final server = await _remoteNoteOrNull(target);
         if (server == null) {
           target = null; // deleted on the server meanwhile: create it again
-        } else if (_hasContent(server)) {
+        } else if (!_isUntouchedSinceCreate(server, note.remoteBaseline)) {
           final copy = await _api.createNote(
             title: '${cleanRemoteTitle(note.title)} (offline copy)',
             noteType: note.noteType,
@@ -138,7 +140,7 @@ class SyncService {
           notebookId: notebookId == null ? null : serverNotebookIds[notebookId],
         );
         target = created.id;
-        await _local.setNoteRemoteId(note.id, target);
+        await _local.setNoteRemoteId(note.id, target, created.updatedAt);
         notes++;
       }
       await _uploadContent(note, target);
@@ -167,8 +169,19 @@ class SyncService {
     }
   }
 
-  static bool _hasContent(api.Note note) => (note.pages ?? const []).any(
-      (p) => p.typedContent.isNotEmpty || p.strokes.isNotEmpty);
+  /// True only when [server] is still exactly the note our push created:
+  /// same updated_at as recorded at create time ([baseline]) and no content.
+  /// Every server-side write moves updated_at, so an emptied note or a note
+  /// edited and reverted does not pass. Without a comparable baseline there
+  /// is no proof, so this is false.
+  static bool _isUntouchedSinceCreate(api.Note server, String? baseline) {
+    final created = baseline == null ? null : DateTime.tryParse(baseline);
+    final current = DateTime.tryParse(server.updatedAt);
+    if (created == null || current == null) return false;
+    if (!current.isAtSameMomentAs(created)) return false;
+    return !(server.pages ?? const []).any(
+        (p) => p.typedContent.isNotEmpty || p.strokes.isNotEmpty);
+  }
 
   static bool _isAlreadySynced(String status) => status == 'synced';
 
