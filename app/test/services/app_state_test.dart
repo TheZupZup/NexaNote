@@ -2,7 +2,6 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:sqflite/sqflite.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 import 'package:nexanote/data/database/schema.dart';
@@ -12,11 +11,9 @@ import 'package:nexanote/services/local_note_service.dart';
 import 'package:nexanote/services/sync_service.dart';
 
 class _StubApi extends api.ApiClient {
-  _StubApi({bool shouldThrow = false, this.pingResult = true})
-      : shouldThrow = shouldThrow,
-        super(baseUrl: 'http://stub.test');
+  _StubApi({this.shouldThrow = false}) : super(baseUrl: 'http://stub.test');
   bool shouldThrow;
-  final bool pingResult;
+  final bool pingResult = true;
   int createNoteCalls = 0;
 
   @override

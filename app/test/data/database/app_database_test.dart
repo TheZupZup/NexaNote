@@ -108,7 +108,7 @@ void main() {
 
   group('Schema.onUpgrade', () {
     test('adds remote_id/remote_path when migrating v1 → v2', () async {
-      final dbPath = inMemoryDatabasePath;
+      const dbPath = inMemoryDatabasePath;
 
       // Open at v1 with the v1 schema (no remote_id/remote_path).
       final v1 = await openDatabase(

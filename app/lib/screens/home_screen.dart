@@ -5,7 +5,6 @@ import '../services/api_client.dart';
 import '../widgets/notebook_sidebar.dart';
 import '../widgets/notes_list.dart';
 import 'note_editor_screen.dart';
-import 'settings_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -343,10 +342,10 @@ class _EmptyEditor extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Center(child: Column(mainAxisSize: MainAxisSize.min, children: [
-      Icon(Icons.edit_note, size: 64, color: Theme.of(context).colorScheme.onSurface.withOpacity(0.2)),
+      Icon(Icons.edit_note, size: 64, color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.2)),
       const SizedBox(height: 16),
       Text('Select a note or create one',
-        style: TextStyle(color: Theme.of(context).colorScheme.onSurface.withOpacity(0.4))),
+        style: TextStyle(color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.4))),
     ]));
   }
 }

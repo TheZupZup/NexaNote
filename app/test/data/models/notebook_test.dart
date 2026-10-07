@@ -3,7 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:nexanote/data/models/notebook.dart';
 
 void main() {
-  final _ts = DateTime.utc(2024, 6, 1, 9, 0);
+  final ts = DateTime.utc(2024, 6, 1, 9, 0);
 
   group('Notebook', () {
     test('toMap / fromMap round-trip preserves all fields', () {
@@ -16,8 +16,8 @@ void main() {
         icon: 'briefcase',
         isArchived: false,
         syncStatus: 'synced',
-        createdAt: _ts,
-        updatedAt: _ts,
+        createdAt: ts,
+        updatedAt: ts,
       );
 
       final restored = Notebook.fromMap(nb.toMap());
@@ -44,8 +44,8 @@ void main() {
         'icon': 'notebook',
         'is_archived': 0,
         'sync_status': 'local_only',
-        'created_at': _ts.toIso8601String(),
-        'updated_at': _ts.toIso8601String(),
+        'created_at': ts.toIso8601String(),
+        'updated_at': ts.toIso8601String(),
       };
       final nb = Notebook.fromMap(map);
       expect(nb.parentId, isNull);
@@ -56,20 +56,20 @@ void main() {
       final nb = Notebook(
         id: 'nb-1',
         name: 'Old',
-        createdAt: _ts,
-        updatedAt: _ts,
+        createdAt: ts,
+        updatedAt: ts,
       );
       final updated = nb.copyWith(
         name: 'New',
         syncStatus: 'modified',
-        updatedAt: _ts.add(const Duration(hours: 1)),
+        updatedAt: ts.add(const Duration(hours: 1)),
       );
 
       expect(updated.id, 'nb-1');
       expect(updated.name, 'New');
       expect(updated.syncStatus, 'modified');
-      expect(updated.createdAt, _ts);
-      expect(updated.updatedAt, isNot(_ts));
+      expect(updated.createdAt, ts);
+      expect(updated.updatedAt, isNot(ts));
     });
 
     test('toMap encodes isArchived as 0/1 integer', () {
@@ -77,8 +77,8 @@ void main() {
         id: 'nb-2',
         name: 'X',
         isArchived: true,
-        createdAt: _ts,
-        updatedAt: _ts,
+        createdAt: ts,
+        updatedAt: ts,
       );
       expect(nb.toMap()['is_archived'], 1);
     });

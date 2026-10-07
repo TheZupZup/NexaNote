@@ -83,7 +83,7 @@ class SyncService {
   /// Adopted notes (remoteId set by a pull, status synced/modified/conflict)
   /// are never pushed: local rows of pulled notes hold no page content, so
   /// uploading them would blank the server copy.
-  Future<_PushCounts> pushLocal() async {
+  Future<PushCounts> pushLocal() async {
     final snapshot = await _local.exportAllData();
     var notebooks = 0;
     var notes = 0;
@@ -146,7 +146,7 @@ class SyncService {
       await _uploadContent(note, target);
       await _local.markNoteSyncedIfUnchanged(note.id, note.updatedAt);
     }
-    return _PushCounts(notebooks: notebooks, notes: notes);
+    return PushCounts(notebooks: notebooks, notes: notes);
   }
 
   Future<void> _uploadContent(Note note, String remoteId) async {
@@ -200,7 +200,7 @@ class SyncService {
   /// - When a remote note carries the same cleaned title as an unrelated
   ///   local row (different id), both are kept and the local row is
   ///   flagged with `sync_status='conflict'`.
-  Future<_PullCounts> pullRemote() async {
+  Future<PullCounts> pullRemote() async {
     final remoteNotebooks = await _api.getNotebooks();
     final remoteNotes = await _api.getNotes(includeDeleted: true);
 
@@ -314,7 +314,7 @@ class SyncService {
       }
     }
 
-    return _PullCounts(
+    return PullCounts(
       notebooks: remoteNotebooks.length,
       notes: remoteNotes.length,
       adopted: adopted,
@@ -389,17 +389,19 @@ class SyncService {
       title_cleaner.cleanRemoteTitle(raw);
 }
 
-class _PushCounts {
+/// Records created on the server by [SyncService.pushLocal].
+class PushCounts {
   final int notebooks;
   final int notes;
-  const _PushCounts({required this.notebooks, required this.notes});
+  const PushCounts({required this.notebooks, required this.notes});
 }
 
-class _PullCounts {
+/// What [SyncService.pullRemote] read from the server.
+class PullCounts {
   final int notebooks;
   final int notes;
   final int adopted;
-  const _PullCounts({
+  const PullCounts({
     required this.notebooks,
     required this.notes,
     required this.adopted,

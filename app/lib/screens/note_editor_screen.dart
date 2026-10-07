@@ -498,7 +498,7 @@ class _ModeToggle extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.all(3),
       decoration: BoxDecoration(
-          color: scheme.surfaceContainerHighest.withOpacity(0.5),
+          color: scheme.surfaceContainerHighest.withValues(alpha: 0.5),
           borderRadius: BorderRadius.circular(10)),
       child: Row(mainAxisSize: MainAxisSize.min, children: [
         _ModeBtn(
@@ -535,7 +535,7 @@ class _ModeBtn extends StatelessWidget {
   Widget build(BuildContext context) {
     final fg = selected
         ? Colors.white
-        : Theme.of(context).colorScheme.onSurface.withOpacity(0.6);
+        : Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.6);
     return Tooltip(
       message: label,
       child: GestureDetector(
@@ -741,7 +741,7 @@ class _Btn extends StatelessWidget {
                     color: Theme.of(context)
                         .colorScheme
                         .onSurface
-                        .withOpacity(0.7)))));
+                        .withValues(alpha: 0.7)))));
   }
 }
 
@@ -757,7 +757,7 @@ class _WordCountFooter extends StatelessWidget {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final style =
-        TextStyle(fontSize: 11, color: scheme.onSurface.withOpacity(0.45));
+        TextStyle(fontSize: 11, color: scheme.onSurface.withValues(alpha: 0.45));
     return Container(
       constraints: const BoxConstraints(minHeight: 36),
       alignment: Alignment.centerLeft,

@@ -51,7 +51,7 @@ class InkStrokeData {
   Map<String, dynamic> toJson() => {
         'id': id,
         'color':
-            '#${color.value.toRadixString(16).padLeft(8, '0').substring(2)}',
+            '#${color.toARGB32().toRadixString(16).padLeft(8, '0').substring(2)}',
         'width': width,
         'tool': tool.name,
         'points': points.map((p) => p.toJson()).toList(),
@@ -118,7 +118,7 @@ class _InkPainter extends CustomPainter {
 
   void _drawTemplate(Canvas canvas, Size size) {
     final paint = Paint()
-      ..color = const Color(0xFFDDDDFF).withOpacity(0.5)
+      ..color = const Color(0xFFDDDDFF).withValues(alpha: 0.5)
       ..strokeWidth = 0.5;
 
     switch (template) {
@@ -140,7 +140,7 @@ class _InkPainter extends CustomPainter {
       case 'dotted':
         const spacing = 40.0;
         final dotPaint = Paint()
-          ..color = const Color(0xFFAAAACC).withOpacity(0.5)
+          ..color = const Color(0xFFAAAACC).withValues(alpha: 0.5)
           ..strokeWidth = 1.5
           ..strokeCap = StrokeCap.round;
         for (double y = spacing; y < size.height; y += spacing) {
@@ -178,7 +178,7 @@ class _InkPainter extends CustomPainter {
 
       final paint = Paint()
         ..color = isHighlighter
-            ? stroke.color.withOpacity(0.35)
+            ? stroke.color.withValues(alpha: 0.35)
             : stroke.color
         ..strokeWidth = w
         ..strokeCap = StrokeCap.round
@@ -468,8 +468,8 @@ class _InkCanvasState extends State<InkCanvas> {
                 },
                 child: Transform(
                   transform: Matrix4.identity()
-                    ..translate(_offset.dx, _offset.dy)
-                    ..scale(_scale),
+                    ..translateByDouble(_offset.dx, _offset.dy, 0, 1)
+                    ..scaleByDouble(_scale, _scale, _scale, 1),
                   child: CustomPaint(
                     painter: _InkPainter(
                       strokes: _strokes,
@@ -642,7 +642,7 @@ class _ToolBtn extends StatelessWidget {
           padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
           decoration: BoxDecoration(
             color: selected
-                ? const Color(0xFF6366F1).withOpacity(0.15)
+                ? const Color(0xFF6366F1).withValues(alpha: 0.15)
                 : Colors.transparent,
             borderRadius: BorderRadius.circular(8),
           ),
@@ -651,7 +651,7 @@ class _ToolBtn extends StatelessWidget {
             size: 20,
             color: selected
                 ? const Color(0xFF6366F1)
-                : Theme.of(context).colorScheme.onSurface.withOpacity(0.6),
+                : Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.6),
           ),
         ),
       ),
