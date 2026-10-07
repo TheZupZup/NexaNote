@@ -175,6 +175,35 @@ void main() {
 
     expect(find.textContaining('Could not create note'), findsOneWidget);
   });
+
+  testWidgets('a search started on the wide layout stays visible and '
+      'clearable after switching to the phone layout', (tester) async {
+    await tester.runAsync(() async {
+      await seed('Alpha', '');
+      await seed('Beta', '');
+      await state.loadNotes();
+    });
+    await pumpApp(tester);
+    final search = find.byWidgetPredicate(
+        (w) => w is TextField && w.decoration?.hintText == 'Search notes...');
+    await tester.enterText(search, 'alp');
+    await settle(tester);
+    expect(find.text('Beta'), findsNothing);
+
+    // Window narrowed / tablet rotated: phone layout, no search field.
+    tester.view.physicalSize = const Size(400, 800);
+    await settle(tester);
+    expect(find.text('Filtered by "alp"'), findsOneWidget);
+    await tester.tap(find.byTooltip('Clear search'));
+    await settle(tester);
+    expect(find.text('Beta'), findsOneWidget);
+
+    // Back to wide: the field shows the current (cleared) query.
+    tester.view.physicalSize = const Size(1280, 800);
+    await settle(tester);
+    expect(find.descendant(of: search, matching: find.text('alp')),
+        findsNothing);
+  });
 }
 
 class _RefusingApi extends api.ApiClient {

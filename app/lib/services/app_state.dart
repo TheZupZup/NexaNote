@@ -125,6 +125,9 @@ class AppState extends ChangeNotifier {
   /// so they never tear down HomeScreen (search field, open editor).
   bool get isStarting => _isStarting;
   bool get isLoading => _isLoading;
+
+  /// The active notes search, kept across list reloads ('' or null: none).
+  String get searchQuery => _searchQuery ?? '';
   bool get isSyncing => _isSyncing;
   String? get syncMessage => _syncMessage;
   String? get syncError => _syncError;
