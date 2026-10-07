@@ -794,7 +794,12 @@ class _StatChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Column(
+    // Four chips share one row; on a 320px phone (or with large counts) they
+    // shrink to fit instead of overflowing the card.
+    return Expanded(
+      child: FittedBox(
+        fit: BoxFit.scaleDown,
+        child: Column(
       children: [
         Text(value,
             style: const TextStyle(
@@ -809,6 +814,8 @@ class _StatChip extends StatelessWidget {
                     .onSurface
                     .withOpacity(0.5))),
       ],
+        ),
+      ),
     );
   }
 }
