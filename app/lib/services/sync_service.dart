@@ -3,6 +3,7 @@ import 'dart:convert';
 import '../data/models/note.dart';
 import '../data/models/notebook.dart';
 import 'api_client.dart' as api;
+import 'ink_json.dart';
 import 'local_note_service.dart';
 import 'title_cleaner.dart' as title_cleaner;
 
@@ -70,32 +71,66 @@ class SyncService {
     );
   }
 
-  /// Uploads only locally-originated records that have never been seen on
-  /// the server. A row is considered "needs push" iff it has no
-  /// [Note.remoteId] AND its `syncStatus` is not `synced`. After a pull,
-  /// every adopted note carries `synced` plus a `remoteId`, so subsequent
-  /// pushes are no-ops until the user creates something new.
+  /// Uploads locally-originated records the server has never seen.
+  ///
+  /// Notebooks are created first and the local row is re-keyed to the id the
+  /// server minted, so notes are filed under a notebook the server knows.
+  ///
+  /// A note is created, then its text and drawing are uploaded, then it is
+  /// marked `synced` with the server id as its [Note.remoteId]. If an upload
+  /// fails after the create, the note stays `local_only` with its remoteId
+  /// set and the next push resumes the upload instead of creating it again.
+  /// Adopted notes (remoteId set by a pull, status synced/modified/conflict)
+  /// are never pushed: local rows of pulled notes hold no page content, so
+  /// uploading them would blank the server copy.
   Future<_PushCounts> pushLocal() async {
     final snapshot = await _local.exportAllData();
     var notebooks = 0;
     var notes = 0;
+    final serverNotebookIds = <String, String>{};
     for (final nb in snapshot.notebooks) {
-      if (_isAlreadySynced(nb.syncStatus)) continue;
-      await _api.createNotebook(name: nb.name, color: nb.color);
+      if (_isAlreadySynced(nb.syncStatus)) {
+        serverNotebookIds[nb.id] = nb.id;
+        continue;
+      }
+      final created = await _api.createNotebook(name: nb.name, color: nb.color);
+      await _local.adoptRemoteNotebook(
+        nb.id,
+        nb.copyWith(syncStatus: 'synced').withId(created.id),
+      );
+      serverNotebookIds[nb.id] = created.id;
       notebooks++;
     }
     for (final note in snapshot.notes) {
       if (_isAlreadySynced(note.syncStatus)) continue;
-      // Already adopted from a remote .md file — never re-create on the
-      // server. The non-idempotent createNote endpoint would mint a fresh
-      // UUID and a duplicate file alongside the existing one.
-      if (note.remoteId != null && note.remoteId!.isNotEmpty) continue;
-      await _api.createNote(
-        title: cleanRemoteTitle(note.title),
-        noteType: note.noteType,
-        notebookId: note.notebookId,
-      );
-      notes++;
+      final pendingUpload = note.syncStatus == 'local_only';
+      var remoteId = note.remoteId;
+      final hasRemote = remoteId != null && remoteId.isNotEmpty;
+      if (hasRemote && !pendingUpload) continue;
+      if (!hasRemote) {
+        // Deleted before it ever reached the server: nothing to propagate.
+        if (note.isDeleted) continue;
+        final notebookId = note.notebookId;
+        final created = await _api.createNote(
+          title: cleanRemoteTitle(note.title),
+          noteType: note.noteType,
+          // A notebook deleted locally is unknown to the server, which would
+          // reject the note; file it unsorted rather than abort the push.
+          notebookId: notebookId == null ? null : serverNotebookIds[notebookId],
+        );
+        remoteId = created.id;
+        await _local.setNoteRemoteId(note.id, remoteId);
+        notes++;
+      }
+      if (note.typedContent.isNotEmpty) {
+        await _api.savePageText(remoteId, 1, note.typedContent);
+      }
+      final strokes = await _local.getStrokesForNote(note.id);
+      if (strokes.isNotEmpty) {
+        await _api.savePageInk(
+            remoteId, 1, strokes.map(inkJsonFromStroke).toList());
+      }
+      await _local.markNoteSyncedIfUnchanged(note.id, note.updatedAt);
     }
     return _PushCounts(notebooks: notebooks, notes: notes);
   }
@@ -172,8 +207,12 @@ class SyncService {
         // 'modified' row beats an older or equal-time remote so user edits
         // aren't clobbered before the next push round.
         final remoteUpdated = _parseUtc(r.updatedAt);
-        final keepLocal = existing.syncStatus == 'modified' &&
-            existing.updatedAt.isAfter(remoteUpdated);
+        // A local_only row with a remoteId was created by our own push and
+        // still has content to upload; adopting the remote copy now would
+        // mark it synced and the upload would never be retried.
+        final keepLocal = existing.syncStatus == 'local_only' ||
+            (existing.syncStatus == 'modified' &&
+                existing.updatedAt.isAfter(remoteUpdated));
         if (keepLocal) continue;
         await _local.upsertNote(existing.copyWith(
           notebookId: r.notebookId,

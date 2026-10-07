@@ -66,6 +66,14 @@ class LocalNoteService {
       _repo.updateNoteFields(id, {'typed_content': typedContent});
   Future<void> markNoteModified(String id) => _repo.updateNoteFields(id);
 
+  // Push bookkeeping used by SyncService.
+  Future<void> setNoteRemoteId(String id, String remoteId) =>
+      _repo.setNoteRemoteId(id, remoteId);
+  Future<bool> markNoteSyncedIfUnchanged(String id, DateTime seenUpdatedAt) =>
+      _repo.markNoteSyncedIfUnchanged(id, seenUpdatedAt);
+  Future<void> adoptRemoteNotebook(String localId, Notebook remote) =>
+      _repo.adoptRemoteNotebook(localId, remote);
+
   /// Soft-deletes a note (sets `is_deleted`, marks it `modified`) so the
   /// deletion can later propagate once a backend is configured. Used by the
   /// local-mode delete path; sync uses [hardDeleteNote] for server-driven

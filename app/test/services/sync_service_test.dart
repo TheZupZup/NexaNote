@@ -18,6 +18,19 @@ class FakeApiClient extends api.ApiClient {
   List<api.Note> remoteNotes = [];
   List<Map<String, dynamic>> createdNotebooks = [];
   List<Map<String, dynamic>> createdNotes = [];
+  Map<String, String> savedText = {};
+  Map<String, List<Map<String, dynamic>>> savedInk = {};
+
+  @override
+  Future<void> savePageText(String noteId, int pageNum, String content) async {
+    savedText[noteId] = content;
+  }
+
+  @override
+  Future<void> savePageInk(
+      String noteId, int pageNum, List<Map<String, dynamic>> strokes) async {
+    savedInk[noteId] = strokes;
+  }
 
   @override
   Future<List<api.Notebook>> getNotebooks() async => remoteNotebooks;
@@ -36,13 +49,16 @@ class FakeApiClient extends api.ApiClient {
     String color = '#6366f1',
   }) async {
     createdNotebooks.add({'name': name, 'color': color});
-    return api.Notebook(
+    final created = api.Notebook(
       id: 'remote-nb-${createdNotebooks.length}',
       name: name,
       color: color,
       icon: 'notebook',
       updatedAt: DateTime.now().toUtc().toIso8601String(),
     );
+    // Like the real server, list what was created on the next pull.
+    remoteNotebooks = [...remoteNotebooks, created];
+    return created;
   }
 
   @override
@@ -58,7 +74,7 @@ class FakeApiClient extends api.ApiClient {
       'notebookId': notebookId,
     });
     final now = DateTime.now().toUtc().toIso8601String();
-    return api.Note(
+    final created = api.Note(
       id: 'remote-note-${createdNotes.length}',
       title: title,
       noteType: noteType,
@@ -70,6 +86,8 @@ class FakeApiClient extends api.ApiClient {
       updatedAt: now,
       createdAt: now,
     );
+    remoteNotes = [...remoteNotes, created];
+    return created;
   }
 }
 
@@ -160,6 +178,69 @@ void main() {
       fakeApi.createdNotes.map((n) => n['title']),
       containsAll(['Meeting notes', 'Ideas']),
     );
+  });
+
+  test('pushLocal uploads the note body and drawing, not just the title',
+      () async {
+    final note = await local.createNote('Offline', noteType: 'mixed');
+    await local.updateNoteContent(note.id, 'written offline');
+    await local.replaceStrokesForNote(note.id, [
+      Stroke(
+        id: 's1',
+        noteId: note.id,
+        createdAt: DateTime.utc(2024),
+        points: const [
+          StrokePoint(x: 1, y: 2, pressure: 0.4),
+          StrokePoint(x: 3, y: 4, pressure: 0.6),
+        ],
+      ),
+    ]);
+
+    await sync.pushLocal();
+
+    expect(fakeApi.savedText['remote-note-1'], 'written offline');
+    expect(fakeApi.savedInk['remote-note-1'], hasLength(1));
+    expect(fakeApi.savedInk['remote-note-1']!.first['points'], hasLength(2));
+  });
+
+  test('pushLocal files notes under the server id of their notebook',
+      () async {
+    final nb = await local.createNotebook('Work');
+    await local.createNote('Plan', notebookId: nb.id);
+
+    await sync.pushLocal();
+
+    // The server minted its own notebook id; sending the local one would
+    // be rejected (404) and abort the push.
+    expect(fakeApi.createdNotes.single['notebookId'], 'remote-nb-1');
+  });
+
+  test('pushLocal does not resurrect notes deleted before they were pushed',
+      () async {
+    final note = await local.createNote('Scratch');
+    await local.deleteNote(note.id);
+
+    final counts = await sync.pushLocal();
+
+    expect(counts.notes, 0);
+    expect(fakeApi.createdNotes, isEmpty);
+  });
+
+  test('syncing again after a push does not duplicate notes or notebooks',
+      () async {
+    final nb = await local.createNotebook('Work');
+    await local.createNote('Plan', notebookId: nb.id);
+
+    await sync.sync();
+    await sync.sync();
+    await sync.sync();
+
+    expect(fakeApi.createdNotebooks, hasLength(1));
+    expect(fakeApi.createdNotes, hasLength(1));
+    final snapshot = await local.exportAllData();
+    expect(snapshot.notes.where((n) => !n.isDeleted), hasLength(1));
+    expect(snapshot.notes.single.syncStatus, 'synced');
+    expect(snapshot.notebooks, hasLength(1));
   });
 
   test('pushLocal skips records already marked synced', () async {
@@ -383,11 +464,13 @@ void main() {
 
     expect(result.notebooksPushed, 1);
     expect(result.notesPushed, 1);
-    expect(result.notebooksPulled, 1);
-    expect(result.notesPulled, 0);
+    expect(result.notebooksPulled, 2);
+    expect(result.notesPulled, 1);
 
+    // The pushed notebook is now known by the id the server gave it.
     final notebooks = await local.getNotebooks();
-    expect(notebooks.map((n) => n.id), containsAll([nb.id, 'nb-r']));
+    expect(notebooks.map((n) => n.id), containsAll(['remote-nb-1', 'nb-r']));
+    expect(notebooks.map((n) => n.id), isNot(contains(nb.id)));
   });
 
   test('pullRemote preserves local strokes (metadata-only sync)', () async {

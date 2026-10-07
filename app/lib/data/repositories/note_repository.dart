@@ -187,6 +187,41 @@ class NoteRepository {
     );
   }
 
+  /// Links local note [id] to the note the server created for it, keeping it
+  /// pending (`local_only`) until its content has been uploaded too.
+  Future<void> setNoteRemoteId(String id, String remoteId) async {
+    await _db.update('notes', {'remote_id': remoteId},
+        where: 'id = ?', whereArgs: [id]);
+  }
+
+  /// Marks note [id] as synced, unless it was edited after [seenUpdatedAt]
+  /// (the version that was uploaded). Returns whether it was marked.
+  Future<bool> markNoteSyncedIfUnchanged(
+      String id, DateTime seenUpdatedAt) async {
+    final changed = await _db.update(
+      'notes',
+      {'sync_status': 'synced'},
+      where: 'id = ? AND updated_at = ?',
+      whereArgs: [id, seenUpdatedAt.toIso8601String()],
+    );
+    return changed > 0;
+  }
+
+  /// Re-keys local notebook [localId] to [remote], the copy the server just
+  /// created for it, and moves its notes and child notebooks along, so the
+  /// local store refers to the notebook by the id the server knows.
+  Future<void> adoptRemoteNotebook(String localId, Notebook remote) async {
+    await _db.transaction((txn) async {
+      await txn.insert('notebooks', remote.toMap(),
+          conflictAlgorithm: ConflictAlgorithm.replace);
+      await txn.update('notes', {'notebook_id': remote.id},
+          where: 'notebook_id = ?', whereArgs: [localId]);
+      await txn.update('notebooks', {'parent_id': remote.id},
+          where: 'parent_id = ?', whereArgs: [localId]);
+      await txn.delete('notebooks', where: 'id = ?', whereArgs: [localId]);
+    });
+  }
+
   /// Inserts [notebook] or replaces an existing row with the same id.
   Future<void> upsertNotebook(Notebook notebook) async {
     await _db.insert(

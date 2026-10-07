@@ -63,6 +63,33 @@ class _StubApi extends api.ApiClient {
   }
 }
 
+/// Backend that is reachable but fails the first note upload, as a dropped
+/// connection mid-migration would.
+class _FlakyUploadApi extends _StubApi {
+  int failuresLeft = 1;
+  final savedText = <String, String>{};
+
+  @override
+  Future<api.Note> createNote({
+    required String title,
+    required String noteType,
+    String? notebookId,
+    String template = 'blank',
+  }) {
+    if (failuresLeft > 0) {
+      failuresLeft--;
+      throw Exception('connection reset');
+    }
+    return super.createNote(
+        title: title, noteType: noteType, notebookId: notebookId);
+  }
+
+  @override
+  Future<void> savePageText(String noteId, int pageNum, String content) async {
+    savedText[noteId] = content;
+  }
+}
+
 void main() {
   setUpAll(() {
     sqfliteFfiInit();
@@ -705,6 +732,26 @@ void main() {
       expect(s.localMode, isFalse);
       expect(stub.createNoteCalls, greaterThan(0),
           reason: 'the offline note should be pushed to the backend on switch');
+    });
+
+    test('offline notes are uploaded on a later connect if the first upload '
+        'failed', () async {
+      final stub = _FlakyUploadApi();
+      final s = AppState(localService: service, clientFactory: (_) => stub);
+      await s.enableLocalMode();
+      final note = await s.createNote(title: 'Offline note', noteType: 'typed');
+      await s.savePageText(note.id, 1, 'only copy of this text');
+
+      await s.connect(url: 'http://192.0.2.10:8766');
+      expect(s.syncError, contains('Could not upload notes taken offline'));
+      expect(stub.savedText, isEmpty);
+
+      await s.connect();
+      expect(stub.savedText.values, ['only copy of this text']);
+      expect(stub.createNoteCalls, 1);
+
+      await s.connect();
+      expect(stub.createNoteCalls, 1, reason: 'already uploaded, not again');
     });
 
     test('existing connected users are not reset to onboarding or local mode',
