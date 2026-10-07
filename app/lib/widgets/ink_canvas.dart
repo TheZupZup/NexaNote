@@ -258,6 +258,7 @@ class _InkCanvasState extends State<InkCanvas> {
   /// The one pointer currently drawing. Other pointers (a palm, a second
   /// finger) must not add points to its stroke or start a new one over it.
   int? _drawingPointer;
+  bool _drawingWithTouch = false;
 
   /// Touch pointers currently down. Two or more is a pinch/pan gesture, not
   /// ink, so any stroke started by the first finger is discarded.
@@ -378,7 +379,14 @@ class _InkCanvasState extends State<InkCanvas> {
         return;
       }
     }
-    if (_drawingPointer != null) return;
+    final isStylus = e.kind == PointerDeviceKind.stylus ||
+        e.kind == PointerDeviceKind.invertedStylus;
+    if (_drawingPointer != null) {
+      // A palm resting on the screen before the pen lands is not ink: the
+      // stylus takes over and the touch stroke is dropped.
+      if (!isStylus || !_drawingWithTouch) return;
+      setState(() => _currentStroke = null);
+    }
     final drawable = switch (e.kind) {
       PointerDeviceKind.stylus ||
       PointerDeviceKind.invertedStylus ||
@@ -389,6 +397,7 @@ class _InkCanvasState extends State<InkCanvas> {
     };
     if (!drawable) return;
     _drawingPointer = e.pointer;
+    _drawingWithTouch = e.kind == PointerDeviceKind.touch;
     final pressure = e.pressure > 0 ? e.pressure : 0.5;
     _startStroke(_toCanvasPos(e.localPosition), pressure);
   }

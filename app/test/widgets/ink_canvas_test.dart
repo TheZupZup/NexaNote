@@ -89,4 +89,24 @@ void main() {
 
     expect(saves, isEmpty);
   });
+
+  testWidgets('a palm already resting on the screen does not block the stylus',
+      (tester) async {
+    await pumpCanvas(tester);
+    final palm = await tester.startGesture(canvasPoint(tester, 400, 600),
+        pointer: 1, kind: PointerDeviceKind.touch);
+    await palm.moveBy(const Offset(5, 5));
+    final pen = await tester.startGesture(canvasPoint(tester, 100, 200),
+        pointer: 2, kind: PointerDeviceKind.stylus);
+    await pen.moveBy(const Offset(20, 0));
+    await pen.moveBy(const Offset(20, 0));
+    await pen.up();
+    await palm.moveBy(const Offset(5, 5));
+    await palm.up();
+    await tester.pump();
+
+    expect(saves, hasLength(1));
+    final points = saves.single.single['points'] as List;
+    expect(points.map((p) => (p as Map)['y']).toSet(), {200.0});
+  });
 }
