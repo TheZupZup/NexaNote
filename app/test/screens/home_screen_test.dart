@@ -6,6 +6,7 @@ import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 import 'package:nexanote/data/database/schema.dart';
 import 'package:nexanote/main.dart';
+import 'package:nexanote/services/api_client.dart' as api;
 import 'package:nexanote/services/app_state.dart';
 import 'package:nexanote/services/local_note_service.dart';
 
@@ -132,4 +133,73 @@ void main() {
     expect(editorBody(), findsOneWidget);
     expect(editorText(tester), 'v2 typed');
   });
+
+  Future<void> pumpPhone(WidgetTester tester, AppState appState) async {
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(400, 800);
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    await tester.pumpWidget(ChangeNotifierProvider<AppState>.value(
+      value: appState,
+      child: const NexaNoteApp(),
+    ));
+    await tester.pumpAndSettle();
+  }
+
+  testWidgets('a blank notebook name is not created on phones', (tester) async {
+    await pumpPhone(tester, state);
+
+    await tester.tap(find.byTooltip('Open navigation menu'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('New notebook'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField).last, '   ');
+    await tester.tap(find.text('Create'));
+    await settle(tester);
+
+    expect(state.notebooks, isEmpty);
+  });
+
+  testWidgets('a failed note creation is reported, not dropped',
+      (tester) async {
+    // Backend configured but refusing writes.
+    final failing = AppState(
+      localService: service,
+      clientFactory: (_) => _RefusingApi(),
+    );
+    await tester.runAsync(() => failing.connect(url: 'http://refusing.test'));
+    await pumpPhone(tester, failing);
+
+    await tester.tap(find.byType(FloatingActionButton));
+    await settle(tester);
+
+    expect(find.textContaining('Could not create note'), findsOneWidget);
+  });
+}
+
+class _RefusingApi extends api.ApiClient {
+  _RefusingApi() : super(baseUrl: 'http://refusing.test');
+
+  @override
+  Future<bool> ping() async => true;
+
+  @override
+  Future<List<api.Notebook>> getNotebooks() async => [];
+
+  @override
+  Future<List<api.Note>> getNotes({
+    String? notebookId,
+    String? search,
+    bool includeDeleted = false,
+  }) async =>
+      [];
+
+  @override
+  Future<api.Note> createNote({
+    required String title,
+    required String noteType,
+    String? notebookId,
+    String template = 'blank',
+  }) async =>
+      throw const api.ApiException('Failed to create note', statusCode: 500);
 }

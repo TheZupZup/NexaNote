@@ -41,7 +41,7 @@ class _DesktopLayout extends StatelessWidget {
           notebooks: state.notebooks,
           selected: state.selectedNotebook,
           onSelect: state.selectNotebook,
-          onCreate: () => _createNotebook(context),
+          onCreate: () => _promptCreateNotebook(context),
           onSync: () => _sync(context),
           isSyncing: state.isSyncing,
           hasSyncError: state.syncError != null,
@@ -76,17 +76,8 @@ class _DesktopLayout extends StatelessWidget {
     );
   }
 
-  Future<void> _createNotebook(BuildContext context) async {
-    final name = await _inputDialog(context, 'New Notebook', 'Name');
-    if (name != null && name.isNotEmpty) {
-      await context.read<AppState>().createNotebook(name, '#6366f1');
-    }
-  }
-
   Future<void> _createNote(BuildContext context) async {
-    final state = context.read<AppState>();
-    final note = await state.createNote(title: 'Untitled', noteType: 'typed');
-    if (context.mounted) await _openNote(context, note.id);
+    await _createAndOpenNote(context);
   }
 
   Future<void> _sync(BuildContext context) async {
@@ -103,14 +94,43 @@ Future<Note?> _openNote(BuildContext context, String id) async {
   try {
     return await context.read<AppState>().openNote(id);
   } catch (e) {
-    if (context.mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text('Could not open note: $e'),
-        backgroundColor: Colors.red.shade700,
-      ));
-    }
+    if (context.mounted) _showError(context, 'Could not open note: $e');
     return null;
   }
+}
+
+/// Creates an untitled note in the current notebook and opens it. A failure
+/// (backend unreachable, server error) is shown rather than dropped.
+Future<Note?> _createAndOpenNote(BuildContext context) async {
+  final state = context.read<AppState>();
+  final Note note;
+  try {
+    note = await state.createNote(title: 'Untitled', noteType: 'typed');
+  } catch (e) {
+    if (context.mounted) _showError(context, 'Could not create note: $e');
+    return null;
+  }
+  if (!context.mounted) return null;
+  return _openNote(context, note.id);
+}
+
+/// Asks for a name and creates the notebook. Blank names are ignored.
+Future<void> _promptCreateNotebook(BuildContext context) async {
+  final state = context.read<AppState>();
+  final name = (await _inputDialog(context, 'New Notebook', 'Name'))?.trim();
+  if (name == null || name.isEmpty) return;
+  try {
+    await state.createNotebook(name, '#6366f1');
+  } catch (e) {
+    if (context.mounted) _showError(context, 'Could not create notebook: $e');
+  }
+}
+
+void _showError(BuildContext context, String message) {
+  ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+    content: Text(message),
+    backgroundColor: Colors.red.shade700,
+  ));
 }
 
 void _showSyncResult(BuildContext context, AppState state) {
@@ -176,10 +196,7 @@ class _MobileLayout extends StatelessWidget {
         notebooks: state.notebooks,
         selected: state.selectedNotebook,
         onSelect: (nb) { state.selectNotebook(nb); Navigator.pop(context); },
-        onCreate: () async {
-          final name = await _inputDialog(context, 'New Notebook', 'Name');
-          if (name != null) await state.createNotebook(name, '#6366f1');
-        },
+        onCreate: () => _promptCreateNotebook(context),
         onSync: () async {
           await state.triggerSync();
           if (context.mounted) _showSyncResult(context, state);
@@ -193,9 +210,7 @@ class _MobileLayout extends StatelessWidget {
         backgroundColor: const Color(0xFF6366F1),
         foregroundColor: Colors.white,
         onPressed: () async {
-          final note = await state.createNote(title: 'Untitled', noteType: 'typed');
-          if (!context.mounted) return;
-          final full = await _openNote(context, note.id);
+          final full = await _createAndOpenNote(context);
           if (full != null && context.mounted) {
             Navigator.push(context, MaterialPageRoute(
               builder: (_) => ChangeNotifierProvider.value(
