@@ -1,0 +1,48 @@
+# Analyzes and tests the Flutter client (app/) on every pull request to main.
+#
+# Unlike the APK release job, nothing here is allowed to fail softly: an
+# analyzer finding (info, warning or error) or a failing test turns the check
+# red. The Python backend is covered by python-app.yml.
+
+name: Flutter app
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+permissions:
+  contents: read
+
+jobs:
+  analyze-and-test:
+    name: Flutter analyze and tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: app
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Same channel as the Android release build, so the PR check runs on
+      # the toolchain the APK is built with.
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Flutter version
+        run: flutter --version
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Analyze
+        run: flutter analyze
+
+      - name: Run tests
+        run: flutter test
