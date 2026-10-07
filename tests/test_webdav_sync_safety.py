@@ -551,3 +551,134 @@ def test_ink_for_another_note_does_not_overwrite_the_note_at_that_path(server):
 
     assert resp.status_code == 409
     assert [s.id for s in sdb.get_note(REAL_ID, load_pages=True).pages[0].strokes] == ["mine"]
+
+
+# ---------------------------------------------------------------------------
+# A claim must be atomic: the placeholder (and anything the client already
+# sent into it) is only removed once the claimed note has been saved.
+# ---------------------------------------------------------------------------
+
+def _placeholder_with_ink(server):
+    sdb = server["db"]
+    assert _mkcol(server, "uncategorized/doc__abcd1234").status_code in (200, 201)
+    ink = {"note_id": CLIENT_ID,
+           "strokes": [{"id": "s1", "points": [{"x": 1, "y": 1}, {"x": 2, "y": 2}]}]}
+    assert requests.put(server["url"] + "uncategorized/doc__abcd1234/page_1.ink",
+                        json=ink, auth=AUTH, timeout=5).status_code < 300
+    return [n for n in sdb.list_notes() if n.id.startswith("abcd1234")][0].id
+
+
+def _registry(sdb):
+    path = sdb.data_dir / ".webdav_placeholders.json"
+    import json
+    return json.loads(path.read_text()) if path.exists() else {}
+
+
+def _assert_placeholder_intact(sdb, placeholder_id):
+    kept = sdb.get_note(placeholder_id, load_pages=True)
+    assert kept is not None
+    assert [s.id for s in kept.pages[0].strokes] == ["s1"]
+    assert placeholder_id in _registry(sdb)
+    assert sdb.get_note(CLIENT_ID) is None
+
+
+@pytest.mark.parametrize("bad_pages", [
+    [{"page_number": "abc", "typed_content": "x"}],
+    [{"page_number": 1, "typed_content": 42}],
+    "not a list",
+    [{"page_number": 0, "typed_content": "x"}],
+])
+def test_invalid_note_json_leaves_the_placeholder_and_its_ink(server, bad_pages):
+    sdb = server["db"]
+    placeholder_id = _placeholder_with_ink(server)
+    body = {"id": CLIENT_ID, "title": "Doc", "pages": bad_pages}
+
+    resp = requests.put(server["url"] + "uncategorized/doc__abcd1234/note.json",
+                        json=body, auth=AUTH, timeout=5)
+
+    assert resp.status_code == 400
+    _assert_placeholder_intact(sdb, placeholder_id)
+
+
+def test_storage_error_during_claim_leaves_the_placeholder(server):
+    sdb = server["db"]
+    placeholder_id = _placeholder_with_ink(server)
+    real_save = sdb.save_note
+
+    def failing_save(note, *args, **kwargs):
+        if note.id == CLIENT_ID:
+            raise OSError("disk full")
+        return real_save(note, *args, **kwargs)
+
+    sdb.save_note = failing_save
+    try:
+        resp = _put_meta(server, "uncategorized/doc__abcd1234", CLIENT_ID)
+    finally:
+        sdb.save_note = real_save
+
+    assert resp.status_code >= 500
+    _assert_placeholder_intact(sdb, placeholder_id)
+
+
+def test_placeholder_is_removed_only_after_the_claimed_note_is_saved(server):
+    sdb = server["db"]
+    placeholder_id = _placeholder_with_ink(server)
+    real_delete = sdb.delete_note_permanent
+    seen = []
+
+    def spying_delete(note_id):
+        if note_id == placeholder_id:
+            claimed = sdb.get_note(CLIENT_ID, load_pages=True)
+            seen.append(claimed is not None and len(claimed.pages[0].strokes) == 1)
+            seen.append(placeholder_id in _registry(sdb))
+        return real_delete(note_id)
+
+    sdb.delete_note_permanent = spying_delete
+    try:
+        resp = _put_meta(server, "uncategorized/doc__abcd1234", CLIENT_ID)
+    finally:
+        sdb.delete_note_permanent = real_delete
+
+    assert resp.status_code < 300
+    # At deletion time the claimed note (with the ink) was already saved and
+    # the registry entry was still there.
+    assert seen == [True, True]
+    assert sdb.get_note(placeholder_id) is None
+    assert placeholder_id not in _registry(sdb)
+    claimed = sdb.get_note(CLIENT_ID, load_pages=True)
+    assert claimed.pages[0].typed_content == "client text"
+    assert [s.id for s in claimed.pages[0].strokes] == ["s1"]
+
+
+@pytest.mark.parametrize("edit", ["title", "tags", "pinned", "type", "notebook"])
+def test_any_user_edit_to_a_placeholder_makes_it_unclaimable(server, edit):
+    sdb = server["db"]
+    assert _mkcol(server, "uncategorized/doc__abcd1234").status_code in (200, 201)
+    placeholder = [n for n in sdb.list_notes() if n.id.startswith("abcd1234")][0]
+    note = sdb.get_note(placeholder.id, load_pages=True)
+    if edit == "title":
+        note.title = "Renamed by the user"
+    elif edit == "tags":
+        note.tags = ["work"]
+    elif edit == "pinned":
+        note.is_pinned = True
+    elif edit == "type":
+        note.note_type = NoteType.HANDWRITTEN
+    elif edit == "notebook":
+        other = Notebook(name="Elsewhere")
+        sdb.save_notebook(other)
+        note.notebook_id = other.id
+    note.touch()
+    sdb.save_note(note)
+
+    resp = _put_meta(server, "uncategorized/doc__abcd1234", CLIENT_ID)
+    if edit == "notebook":
+        # Moved away: the path no longer resolves to it, so a fresh placeholder
+        # is minted and claimed; the user's note itself must be untouched.
+        assert sdb.get_note(placeholder.id).notebook_id == note.notebook_id
+        return
+
+    assert resp.status_code == 409
+    kept = sdb.get_note(placeholder.id, load_pages=True)
+    assert kept is not None
+    assert sdb.get_note(CLIENT_ID) is None
