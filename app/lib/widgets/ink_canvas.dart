@@ -255,6 +255,14 @@ class _InkCanvasState extends State<InkCanvas> {
   final List<List<InkStrokeData>> _undoStack = [];
   InkStrokeData? _currentStroke;
 
+  /// The one pointer currently drawing. Other pointers (a palm, a second
+  /// finger) must not add points to its stroke or start a new one over it.
+  int? _drawingPointer;
+
+  /// Touch pointers currently down. Two or more is a pinch/pan gesture, not
+  /// ink, so any stroke started by the first finger is discarded.
+  final Set<int> _touchPointers = {};
+
   // Outils
   InkTool _tool = InkTool.pen;
   Color _color = Colors.black;
@@ -356,6 +364,42 @@ class _InkCanvasState extends State<InkCanvas> {
     widget.onStrokesChanged([]);
   }
 
+  void _onPointerDown(PointerDownEvent e) {
+    if (e.kind == PointerDeviceKind.touch) {
+      _touchPointers.add(e.pointer);
+      if (_touchPointers.length > 1) {
+        // Second finger: this is a pinch/pan. Drop the stroke the first
+        // finger started instead of committing a zig-zag between them.
+        if (_drawingPointer != null &&
+            _touchPointers.contains(_drawingPointer)) {
+          _drawingPointer = null;
+          setState(() => _currentStroke = null);
+        }
+        return;
+      }
+    }
+    if (_drawingPointer != null) return;
+    final drawable = switch (e.kind) {
+      PointerDeviceKind.stylus ||
+      PointerDeviceKind.invertedStylus ||
+      PointerDeviceKind.touch =>
+        true,
+      PointerDeviceKind.mouse => e.buttons == kPrimaryMouseButton,
+      _ => false,
+    };
+    if (!drawable) return;
+    _drawingPointer = e.pointer;
+    final pressure = e.pressure > 0 ? e.pressure : 0.5;
+    _startStroke(_toCanvasPos(e.localPosition), pressure);
+  }
+
+  void _onPointerEnd(PointerEvent e) {
+    _touchPointers.remove(e.pointer);
+    if (e.pointer != _drawingPointer) return;
+    _drawingPointer = null;
+    _endStroke();
+  }
+
   Offset _toCanvasPos(Offset localPos) {
     return Offset(
       (localPos.dx - _offset.dx) / _scale,
@@ -388,29 +432,23 @@ class _InkCanvasState extends State<InkCanvas> {
         Expanded(
           child: ClipRect(
             child: Listener(
-              onPointerDown: (e) {
-                if (e.kind == PointerDeviceKind.stylus ||
-                    e.kind == PointerDeviceKind.invertedStylus ||
-                    e.kind == PointerDeviceKind.mouse ||
-                    e.kind == PointerDeviceKind.touch) {
-                  final pressure = e.pressure > 0 ? e.pressure : 0.5;
-                  _startStroke(_toCanvasPos(e.localPosition), pressure);
-                }
-              },
+              onPointerDown: _onPointerDown,
               onPointerMove: (e) {
-                if (_currentStroke == null) return;
+                if (e.pointer != _drawingPointer) return;
                 final pressure = e.pressure > 0 ? e.pressure : 0.5;
                 _addPoint(_toCanvasPos(e.localPosition), pressure);
               },
-              onPointerUp: (_) => _endStroke(),
-              onPointerCancel: (_) => _endStroke(),
+              onPointerUp: _onPointerEnd,
+              onPointerCancel: _onPointerEnd,
               child: GestureDetector(
                 // Zoom avec pinch
                 onScaleStart: (d) {
                   _lastFocalPoint = d.focalPoint;
                 },
                 onScaleUpdate: (d) {
-                  if (d.pointerCount == 2) {
+                  // Never zoom under a pen that is drawing (stylus + palm
+                  // also counts as two pointers).
+                  if (d.pointerCount == 2 && _drawingPointer == null) {
                     setState(() {
                       _scale = (_scale * d.scale).clamp(0.5, 5.0);
                       final delta = d.focalPoint - _lastFocalPoint;
