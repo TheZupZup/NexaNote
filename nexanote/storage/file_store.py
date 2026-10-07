@@ -863,9 +863,17 @@ def stem_from_plain_md_id(note_id: str) -> Optional[str]:
         return None
     pad = (-len(encoded)) % 4
     try:
-        return base64.urlsafe_b64decode(encoded + "=" * pad).decode("utf-8")
+        stem = base64.urlsafe_b64decode(encoded + "=" * pad).decode("utf-8")
     except (ValueError, UnicodeDecodeError):
         return None
+    # EN: The stem is joined into notes_dir, so it must name a file in that
+    #     directory: an id built from "../../x" would otherwise let the API
+    #     read and write `.md` files anywhere on disk.
+    # FR: Le stem doit désigner un fichier de notes_dir, sinon un id forgé
+    #     ("../../x") sortirait du dossier.
+    if stem in ("", ".", "..") or any(c in stem for c in ("/", "\\", "\0")):
+        return None
+    return stem
 
 
 def synthesize_plain_md_note(path: Path, md_text: str) -> Note:
