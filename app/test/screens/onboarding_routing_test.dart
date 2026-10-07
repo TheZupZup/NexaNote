@@ -114,4 +114,23 @@ void main() {
     expect(find.byType(FloatingActionButton), findsOneWidget);
     expect(find.text('Use NexaNote offline'), findsNothing);
   });
+
+  testWidgets('the welcome screen fits a small phone without overflowing',
+      (tester) async {
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(360, 740);
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final state = AppState(
+      localService: service,
+      clientFactory: (_) => _OfflineStubApi(),
+    );
+    await state.initLocal();
+
+    await tester.pumpWidget(app(state));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Use NexaNote offline'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
 }

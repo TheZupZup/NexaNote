@@ -286,11 +286,15 @@ class _ConnectScreenState extends State<ConnectScreen> {
                             size: 16,
                             color: scheme.onSurface.withOpacity(0.5)),
                         const SizedBox(width: 6),
-                        Text('How to start the server',
-                            style: TextStyle(
-                                fontWeight: FontWeight.w600,
-                                fontSize: 13,
-                                color: scheme.onSurface.withOpacity(0.7))),
+                        // Flexible so it wraps on narrow phones or with a
+                        // large system font instead of overflowing.
+                        Flexible(
+                          child: Text('How to start the server',
+                              style: TextStyle(
+                                  fontWeight: FontWeight.w600,
+                                  fontSize: 13,
+                                  color: scheme.onSurface.withOpacity(0.7))),
+                        ),
                       ]),
                       const SizedBox(height: 8),
                       _code('cd ~/NexaNote'),
