@@ -431,14 +431,14 @@ class AppState extends ChangeNotifier {
       await _ensureLocalReady();
       final nb = await _localService.createNotebook(name, color: color);
       final apiNb = _toApiNotebook(nb);
-      _notebooks.insert(0, apiNb);
+      _notebooks = [apiNb, ..._notebooks];
       _hasLocalData = true;
       notifyListeners();
       return apiNb;
     }
     try {
       final nb = await client.createNotebook(name: name, color: color);
-      _notebooks.insert(0, nb);
+      _notebooks = [nb, ..._notebooks];
       _markBackendAvailable();
       notifyListeners();
       return nb;
@@ -452,14 +452,14 @@ class AppState extends ChangeNotifier {
     if (_localMode) {
       await _ensureLocalReady();
       await _localService.hardDeleteNotebook(id);
-      _notebooks.removeWhere((n) => n.id == id);
+      _notebooks = [..._notebooks.where((n) => n.id != id)];
       if (_selectedNotebook?.id == id) { _selectedNotebook = null; _notes = []; }
       notifyListeners();
       return;
     }
     try {
       await client.deleteNotebook(id);
-      _notebooks.removeWhere((n) => n.id == id);
+      _notebooks = [..._notebooks.where((n) => n.id != id)];
       if (_selectedNotebook?.id == id) { _selectedNotebook = null; _notes = []; }
       _markBackendAvailable();
       notifyListeners();
@@ -503,7 +503,7 @@ class AppState extends ChangeNotifier {
         noteType: noteType,
       );
       final apiNote = _toApiNote(note);
-      _notes.insert(0, apiNote);
+      _notes = [apiNote, ..._notes];
       _hasLocalData = true;
       notifyListeners();
       return apiNote;
@@ -512,7 +512,7 @@ class AppState extends ChangeNotifier {
       final note = await client.createNote(
         title: title, noteType: noteType,
         notebookId: _selectedNotebook?.id, template: template);
-      _notes.insert(0, note);
+      _notes = [note, ..._notes];
       _markBackendAvailable();
       notifyListeners();
       return note;
@@ -543,14 +543,14 @@ class AppState extends ChangeNotifier {
     if (_localMode) {
       await _ensureLocalReady();
       await _localService.deleteNote(id);
-      _notes.removeWhere((n) => n.id == id);
+      _notes = [..._notes.where((n) => n.id != id)];
       if (_selectedNote?.id == id) _selectedNote = null;
       notifyListeners();
       return;
     }
     try {
       await client.deleteNote(id);
-      _notes.removeWhere((n) => n.id == id);
+      _notes = [..._notes.where((n) => n.id != id)];
       if (_selectedNote?.id == id) _selectedNote = null;
       _markBackendAvailable();
       notifyListeners();
