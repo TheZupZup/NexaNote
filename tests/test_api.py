@@ -313,3 +313,20 @@ class TestSync:
         resp = client.get("/sync/status")
         assert resp.status_code == 200
         assert resp.json()["status"] == "never_synced"
+
+
+class TestInputValidation:
+    def test_unknown_note_type_is_rejected_with_422(self, client):
+        resp = client.post("/notes", json={"title": "x", "note_type": "drawing"})
+        assert resp.status_code == 422
+
+    def test_unknown_conflict_strategy_is_rejected_and_not_saved(self, client):
+        resp = client.post("/sync/configure", json={
+            "server_url": "http://nas.local/", "conflict_strategy": "newest",
+        })
+        assert resp.status_code == 422
+
+        ok = client.post("/sync/configure", json={
+            "server_url": "http://nas.local/", "conflict_strategy": "keep_both",
+        })
+        assert ok.status_code == 200

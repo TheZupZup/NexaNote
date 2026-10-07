@@ -57,6 +57,7 @@ from nexanote.models.note import (
 )
 from nexanote.storage.file_store import FileNoteStore
 from nexanote.sync.client import NexaNoteSyncEngine, SyncConfig, SyncReport
+from nexanote.sync.conflict import ConflictStrategy
 
 logger = logging.getLogger("nexanote.api")
 
@@ -92,7 +93,8 @@ class PageSchema(BaseModel):
 
 class NoteCreateSchema(BaseModel):
     title: str = "Sans titre"
-    note_type: str = "typed"
+    # Typed so an unknown value is a 422, not a 500 from NoteType(...).
+    note_type: NoteType = NoteType.TYPED
     notebook_id: Optional[str] = None
     tags: list[str] = Field(default_factory=list)
     template: str = "blank"
@@ -161,7 +163,9 @@ class SyncConfigSchema(BaseModel):
     server_url: str
     username: str = "nexanote"
     password: str = "nexanote"
-    conflict_strategy: str = "merge_strokes"
+    # Typed so a bad value is rejected up front instead of being saved and
+    # making every later /sync/trigger fail.
+    conflict_strategy: ConflictStrategy = ConflictStrategy.MERGE_STROKES
 
 
 class SyncReportSchema(BaseModel):
@@ -590,7 +594,7 @@ def create_app(db: FileNoteStore) -> FastAPI:
         FR: Sauvegarde les paramètres WebDAV en mémoire et persiste les champs
             sûrs sur disque. Le mot de passe reste en mémoire uniquement.
         """
-        _sync_config.update(config.model_dump())
+        _sync_config.update(config.model_dump(mode="json"))
         _save_sync_config_to_disk()
         return {"status": "configured", "server_url": config.server_url}
 
