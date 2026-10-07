@@ -626,8 +626,10 @@ class _NoteMetaWriter(io.RawIOBase):
                 page.typed_content = page_data.get(
                     "typed_content", page.typed_content
                 )
+                _apply_client_timestamp(page, page_data.get("updated_at"))
             self.note.pages.sort(key=lambda p: p.page_number)
-            self.note.touch()
+            if not _apply_client_timestamp(self.note, payload.get("updated_at")):
+                self.note.touch()
             self.db.save_note(self.note)
             logger.info("Note mise à jour via WebDAV PUT : %s", self.note.title)
         except DAVError:
@@ -635,6 +637,29 @@ class _NoteMetaWriter(io.RawIOBase):
         except Exception as exc:
             logger.exception("note.json write failed")
             raise _safe_dav_error(exc, "saving note failed") from exc
+
+
+def _apply_client_timestamp(obj, value) -> bool:
+    """
+    EN: Keep the edit time a syncing client sends with note.json / page_N.ink
+        instead of stamping the upload time. Stamping made every uploaded
+        note look newer than edits made on the device right after the
+        upload, so the next pull put the old version back over them.
+        Returns False when no usable timestamp was sent.
+    FR: Conserve l'heure de modification envoyée par le client plutôt que
+        l'heure d'envoi, sinon la note paraît plus récente que les
+        modifications faites juste après sur l'appareil.
+    """
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return False
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    obj.updated_at = parsed
+    return True
 
 
 class InkFile(DAVNonCollection):
@@ -776,9 +801,15 @@ class _InkWriter(io.RawIOBase):
                 new_strokes.append(stroke)
 
             self.page.strokes = new_strokes
-            self.page.touch()
+            if _apply_client_timestamp(self.page, payload.get("updated_at")):
+                # The note's own timestamp arrives with note.json; only move
+                # it forward if this drawing is newer.
+                if self.page.updated_at > self.note.updated_at:
+                    self.note.updated_at = self.page.updated_at
+            else:
+                self.page.touch()
+                self.note.touch()
             self.db.save_page(self.page)
-            self.note.touch()
             self.db.save_note(self.note, save_pages=False)
             logger.info(
                 "Page %d mise à jour : %d strokes",

@@ -396,6 +396,8 @@ class TestConflictSafety:
         local = Note(id=REAL_ID, title="Doc", note_type=NoteType.TYPED)
         local.add_page().typed_content = "LOCAL-EDIT"
         local.updated_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        # The page was edited along with its note, not after it.
+        local.pages[0].updated_at = local.updated_at
         local.sync_status = SyncStatus.MODIFIED
         engine.db.save_note(local)
 
