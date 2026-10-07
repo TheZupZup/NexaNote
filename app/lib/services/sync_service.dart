@@ -122,6 +122,10 @@ class SyncService {
             noteType: note.noteType,
             notebookId: server.notebookId,
           );
+          // From now on the copy is this row's remote note: if its upload
+          // fails too, the next push resumes into it (same proof rules)
+          // instead of leaving it empty and creating another one.
+          await _local.setNoteRemoteId(note.id, copy.id, copy.updatedAt);
           await _uploadContent(note, copy.id);
           await _local.markNoteSyncedIfUnchanged(note.id, note.updatedAt);
           notes++;

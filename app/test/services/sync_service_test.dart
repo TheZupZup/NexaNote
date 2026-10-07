@@ -362,6 +362,28 @@ void main() {
       expect(fakeApi.savedInk['remote-note-2'], hasLength(1));
     });
 
+    test('a failed copy upload is resumed into the same copy, not repeated',
+        () async {
+      final remoteId = await interruptedUpload();
+      fakeApi.editOnServer(remoteId, text: 'edited online');
+
+      // The copy gets created but its content upload keeps failing.
+      fakeApi.failText = true;
+      for (var i = 0; i < 3; i++) {
+        await expectLater(sync.pushLocal(), throwsA(isA<api.ApiException>()));
+      }
+      fakeApi.failText = false;
+      await sync.pushLocal();
+      await sync.pushLocal();
+
+      final copies = fakeApi.createdNotes
+          .where((n) => n['title'] == 'Offline (offline copy)')
+          .toList();
+      expect(copies, hasLength(1));
+      expect(fakeApi.savedText['remote-note-2'], 'written offline');
+      expect(fakeApi.savedText[remoteId], 'edited online');
+    });
+
     test('never overwrites what was written in that note online since',
         () async {
       final remoteId = await interruptedUpload();
