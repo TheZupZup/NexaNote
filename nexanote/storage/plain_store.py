@@ -555,7 +555,11 @@ class PlainMarkdownNoteStore:
         }
 
     def _note_from_sidecar(self, sidecar: dict, md_text: str) -> Note:
-        pages_text = _split_pages_body(md_text) if md_text else {}
+        pages_text = (
+            _split_pages_body(md_text, page_count=len(sidecar.get("pages") or []))
+            if md_text
+            else {}
+        )
         pages: list[Page] = []
         for pm in sidecar.get("pages") or []:
             num = int(pm.get("page_number", 1))

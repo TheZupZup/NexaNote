@@ -212,15 +212,18 @@ def _join_frontmatter(meta: dict, body: str) -> str:
     return f"{FRONTMATTER_DELIM}\n{yaml_text}\n{FRONTMATTER_DELIM}\n\n{body_part}"
 
 
-def _split_pages_body(body: str) -> dict[int, str]:
+def _split_pages_body(body: str, page_count: Optional[int] = None) -> dict[int, str]:
     """
     EN: Extract per-page content from the markdown body.
         - With no markers: the entire body belongs to page 1.
         - With `<!-- nexanote:page N -->` markers: split accordingly.
+        A note whose metadata lists a single page is written without
+        markers (see `_join_pages_body`), so its body is never split: text
+        that happens to contain a marker line would otherwise be lost.
     FR: Extrait le contenu page par page depuis le corps markdown.
     """
     matches = list(PAGE_MARKER_RE.finditer(body))
-    if not matches:
+    if not matches or (page_count is not None and page_count <= 1):
         return {1: body.rstrip("\n")}
 
     pages: dict[int, str] = {}
@@ -336,8 +339,8 @@ def deserialize_note(md_text: str, drawings: Optional[dict]) -> Optional[Note]:
     if not meta or "id" not in meta:
         return None
 
-    pages_text = _split_pages_body(body)
     pages_meta = meta.get("pages") or []
+    pages_text = _split_pages_body(body, page_count=len(pages_meta))
 
     # Strokes per page_number
     strokes_by_page: dict[int, list[InkStroke]] = {}
