@@ -756,6 +756,21 @@ void main() {
       expect(stub.createNoteCalls, 1, reason: 'already uploaded, not again');
     });
 
+    test('a notebook selected offline is not kept under its old local id',
+        () async {
+      final stub = _FlakyUploadApi()..failuresLeft = 0;
+      final s = AppState(localService: service, clientFactory: (_) => stub);
+      await s.enableLocalMode();
+      final nb = await s.createNotebook('Work', '#6366f1');
+      s.selectNotebook(nb);
+
+      await s.connect(url: 'http://192.0.2.10:8766');
+
+      // The upload re-keyed the notebook; the stale local id must not be
+      // used for new notes.
+      expect(s.selectedNotebook?.id, isNot(nb.id));
+    });
+
     test('two quick connects upload an offline note only once', () async {
       final stub = _FlakyUploadApi()..failuresLeft = 0;
       final s = AppState(localService: service, clientFactory: (_) => stub);

@@ -296,6 +296,13 @@ class AppState extends ChangeNotifier {
         // uploaded so nothing created in local mode is lost on the switch.
         await _uploadPendingLocalNotes();
         await loadNotebooks();
+        // The upload re-keys notebooks to their server ids, and a notebook
+        // may be gone on this server: don't keep filing new notes under an
+        // id the backend doesn't know.
+        if (_selectedNotebook != null &&
+            !_notebooks.any((nb) => nb.id == _selectedNotebook!.id)) {
+          _selectedNotebook = null;
+        }
         await loadNotes();
       } catch (e) {
         _isBackendAvailable = false;
