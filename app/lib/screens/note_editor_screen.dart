@@ -19,6 +19,20 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
   bool _isSaving = false;
   bool _hasChanges = false;
   bool _inkSaveFailed = false;
+
+  /// Bumped on every edit so a save knows whether the user typed while it ran.
+  int _editGeneration = 0;
+
+  /// Tail of the queue of text saves; see [_persist].
+  Future<bool> _textSaves = Future.value(true);
+
+  /// What storage holds as far as this editor knows, so a save only writes
+  /// the fields that changed.
+  late String _savedTitle;
+  late String _savedContent;
+
+  List<Map<String, dynamic>>? _pendingInk;
+  bool _inkSaveRunning = false;
   late Note _note;
   bool _showInk = false;
 
@@ -48,6 +62,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     _inkStrokes = _note.pages?.isNotEmpty == true
         ? _note.pages!.first.strokes.whereType<Map<String, dynamic>>().toList()
         : <Map<String, dynamic>>[];
+    _savedTitle = _titleCtrl.text;
+    _savedContent = _contentCtrl.text;
     _titleCtrl.addListener(_onChanged);
     _contentCtrl.addListener(_onChanged);
   }
@@ -64,6 +80,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
   }
 
   void _onChanged() {
+    _editGeneration++;
     if (!_hasChanges) setState(() => _hasChanges = true);
     _saveTimer?.cancel();
     _saveTimer = Timer(const Duration(seconds: 2), _save);
@@ -72,31 +89,49 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
   Future<void> _save() async {
     if (!_hasChanges) return;
     if (mounted) setState(() => _isSaving = true);
-    final ok = await _persist();
-    if (!mounted) return;
-    setState(() {
-      _isSaving = false;
-      if (ok) _hasChanges = false;
-    });
+    final save = _persist();
+    await save;
+    // A newer save may have been queued meanwhile; it owns the indicator now.
+    if (!mounted || !identical(save, _textSaves)) return;
+    setState(() => _isSaving = false);
   }
 
-  /// Writes the title and body to local/remote storage.
+  /// Queues a save of the current title and body behind any save already in
+  /// flight, so saves reach storage one at a time and in edit order. Without
+  /// that, a slow save could land after a newer one and put old text back.
   ///
   /// This deliberately saves typed text even while the Draw canvas is visible.
   /// Without that, a user could type, immediately switch to Draw before the
   /// debounce fires, and have the final text skipped because `_showInk` became
-  /// true. The method is free of `setState`/`context` use so [dispose] and mode
-  /// changes can call it safely to flush the last edits.
-  Future<bool> _persist() async {
-    if (!_hasChanges) return true;
+  /// true. Free of `context` use so [dispose] can call it to flush the last
+  /// edits after unmount.
+  Future<bool> _persist() {
+    final title = _titleCtrl.text;
+    final content = _contentCtrl.text;
+    final previous = _textSaves;
+    final save = previous.then((_) => _persistSnapshot(title, content));
+    _textSaves = save;
+    return save;
+  }
+
+  Future<bool> _persistSnapshot(String title, String content) async {
     final state = _appState;
     if (state == null) return false;
+    // Edits made after this point are newer than the snapshot and keep the
+    // note marked unsaved.
+    final generation = _editGeneration;
     try {
-      if (_titleCtrl.text != _note.title) {
-        await state.updateNoteTitle(_note.id, _titleCtrl.text);
-        _note = _note.copyWith(title: _titleCtrl.text);
+      if (title != _savedTitle) {
+        await state.updateNoteTitle(_note.id, title);
+        _savedTitle = title;
       }
-      await state.savePageText(_note.id, 1, _contentCtrl.text);
+      if (content != _savedContent) {
+        await state.savePageText(_note.id, 1, content);
+        _savedContent = content;
+      }
+      if (generation == _editGeneration && mounted) {
+        setState(() => _hasChanges = false);
+      }
       return true;
     } catch (e) {
       if (mounted) {
@@ -110,13 +145,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
   Future<void> _flushTextBeforeModeSwitch() async {
     _saveTimer?.cancel();
     if (!_hasChanges) return;
-    if (mounted) setState(() => _isSaving = true);
-    final ok = await _persist();
-    if (!mounted) return;
-    setState(() {
-      _isSaving = false;
-      if (ok) _hasChanges = false;
-    });
+    await _save();
   }
 
   Future<void> _switchToText() async {
@@ -135,31 +164,45 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     // Keep the on-screen drawing in memory first so a failed persist (or a
     // mode toggle) never drops what the user just drew.
     _inkStrokes = strokes;
+    _pendingInk = strokes;
+    // Each save sends the whole drawing, so only the newest one matters. One
+    // writer drains it: concurrent saves could otherwise land out of order
+    // and replace the drawing with an older copy missing the last strokes.
+    if (_inkSaveRunning) return;
     final state = _appState;
     if (state == null) return;
+    _inkSaveRunning = true;
     try {
-      await state.savePageInk(_note.id, 1, strokes);
-      _inkSaveFailed = false;
-    } catch (e) {
-      debugPrint('Ink save error: $e');
-      // Surface a friendly, throttled error rather than silently dropping the
-      // stroke. The drawing stays on screen regardless.
-      if (mounted && !_inkSaveFailed) {
-        _inkSaveFailed = true;
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-            content: Text(
-                'Could not save drawing — it stays on screen, retrying as you draw.'),
-            backgroundColor: Colors.red));
+      while (_pendingInk != null) {
+        final next = _pendingInk!;
+        _pendingInk = null;
+        try {
+          await state.savePageInk(_note.id, 1, next);
+          _inkSaveFailed = false;
+        } catch (e) {
+          debugPrint('Ink save error: $e');
+          // Surface a friendly, throttled error rather than silently dropping
+          // the stroke. The drawing stays on screen regardless.
+          if (mounted && !_inkSaveFailed) {
+            _inkSaveFailed = true;
+            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                content: Text(
+                    'Could not save drawing — it stays on screen, retrying as you draw.'),
+                backgroundColor: Colors.red));
+          }
+        }
       }
+    } finally {
+      _inkSaveRunning = false;
     }
   }
 
   @override
   void dispose() {
     _saveTimer?.cancel();
-    // Flush any pending text edits synchronously-scheduled before teardown.
-    // _persist captures its AppState reference, so this is safe post-unmount.
-    _persist();
+    // Flush pending text edits. The save is queued behind any in-flight one
+    // and only uses the captured AppState, so it is safe after unmount.
+    if (_hasChanges) _persist();
     _titleCtrl.dispose();
     _contentCtrl.dispose();
     super.dispose();

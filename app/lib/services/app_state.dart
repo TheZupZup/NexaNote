@@ -563,14 +563,7 @@ class AppState extends ChangeNotifier {
   Future<void> updateNoteTitle(String id, String title) async {
     if (_localMode) {
       await _ensureLocalReady();
-      final n = await _localService.getNoteById(id);
-      if (n != null) {
-        await _localService.upsertNote(n.copyWith(
-          title: title,
-          syncStatus: n.syncStatus == 'synced' ? 'modified' : n.syncStatus,
-          updatedAt: DateTime.now().toUtc(),
-        ));
-      }
+      await _localService.updateNoteTitle(id, title);
       await loadNotes(notebookId: _selectedNotebook?.id);
       return;
     }
@@ -587,14 +580,7 @@ class AppState extends ChangeNotifier {
   Future<void> savePageText(String noteId, int pageNum, String content) async {
     if (_localMode) {
       await _ensureLocalReady();
-      final n = await _localService.getNoteById(noteId);
-      if (n != null) {
-        await _localService.upsertNote(n.copyWith(
-          typedContent: content,
-          syncStatus: n.syncStatus == 'synced' ? 'modified' : n.syncStatus,
-          updatedAt: DateTime.now().toUtc(),
-        ));
-      }
+      await _localService.updateNoteContent(noteId, content);
       return;
     }
     try {
@@ -636,13 +622,7 @@ class AppState extends ChangeNotifier {
       await _localService.replaceStrokesForNote(noteId, localStrokes);
       // Mark the note modified so a future sync uploads the drawing. The
       // note's content/type is untouched — only the sync bookkeeping changes.
-      final n = await _localService.getNoteById(noteId);
-      if (n != null) {
-        await _localService.upsertNote(n.copyWith(
-          syncStatus: n.syncStatus == 'synced' ? 'modified' : n.syncStatus,
-          updatedAt: DateTime.now().toUtc(),
-        ));
-      }
+      await _localService.markNoteModified(noteId);
       return;
     }
     try {

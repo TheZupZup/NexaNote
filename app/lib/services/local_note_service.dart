@@ -58,6 +58,14 @@ class LocalNoteService {
       _repo.getNoteByRemoteId(remoteId);
   Future<void> upsertNote(Note note) => _repo.upsertNote(note);
 
+  /// Local edits. Each writes only its own column (plus the sync bookkeeping)
+  /// so concurrent title, text and ink saves can't overwrite each other.
+  Future<void> updateNoteTitle(String id, String title) =>
+      _repo.updateNoteFields(id, {'title': title});
+  Future<void> updateNoteContent(String id, String typedContent) =>
+      _repo.updateNoteFields(id, {'typed_content': typedContent});
+  Future<void> markNoteModified(String id) => _repo.updateNoteFields(id);
+
   /// Soft-deletes a note (sets `is_deleted`, marks it `modified`) so the
   /// deletion can later propagate once a backend is configured. Used by the
   /// local-mode delete path; sync uses [hardDeleteNote] for server-driven

@@ -161,6 +161,32 @@ class NoteRepository {
     );
   }
 
+  /// Records a local edit to note [id]: writes only the given [fields],
+  /// bumps `updated_at` and flags a synced note as `modified`.
+  ///
+  /// A single UPDATE instead of read-modify-write via [upsertNote]: the editor
+  /// saves title, text and ink independently, and a full-row upsert built from
+  /// an earlier read would put back stale copies of the other fields.
+  Future<void> updateNoteFields(
+    String id, [
+    Map<String, Object?> fields = const {},
+  ]) async {
+    final assignments = [
+      for (final column in fields.keys) '$column = ?',
+      'updated_at = ?',
+      "sync_status = CASE sync_status WHEN 'synced' THEN 'modified' "
+          'ELSE sync_status END',
+    ];
+    await _db.rawUpdate(
+      'UPDATE notes SET ${assignments.join(', ')} WHERE id = ?',
+      [
+        ...fields.values,
+        DateTime.now().toUtc().toIso8601String(),
+        id,
+      ],
+    );
+  }
+
   /// Inserts [notebook] or replaces an existing row with the same id.
   Future<void> upsertNotebook(Notebook notebook) async {
     await _db.insert(
