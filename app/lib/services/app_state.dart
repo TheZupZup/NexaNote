@@ -57,7 +57,11 @@ class AppState extends ChangeNotifier {
   String? _backendErrorMessage;
   String? _lastConnectError;
   bool _hasLocalData = false;
+  bool _isStarting = false;
   bool _isLoading = false;
+  String? _searchQuery;
+  int _notesRequest = 0;
+  int _openRequest = 0;
   bool _isSyncing = false;
   String? _syncMessage;
   String? _syncError;
@@ -115,6 +119,10 @@ class AppState extends ChangeNotifier {
   String? get backendErrorMessage => _backendErrorMessage;
   String? get lastConnectError => _lastConnectError;
   bool get hasLocalData => _hasLocalData;
+  /// True only while [init] runs at app start; the shell shows the splash.
+  /// Later reloads use [isLoading], which only drives the notes list spinner,
+  /// so they never tear down HomeScreen (search field, open editor).
+  bool get isStarting => _isStarting;
   bool get isLoading => _isLoading;
   bool get isSyncing => _isSyncing;
   String? get syncMessage => _syncMessage;
@@ -132,6 +140,18 @@ class AppState extends ChangeNotifier {
   LocalNoteService get localService => _localService;
 
   Future<void> init() async {
+    // Set before the first await so the very first frame shows the splash
+    // rather than flashing onboarding while preferences load.
+    _isStarting = true;
+    try {
+      await _init();
+    } finally {
+      _isStarting = false;
+      notifyListeners();
+    }
+  }
+
+  Future<void> _init() async {
     await initLocal();
     final prefs = await SharedPreferences.getInstance();
     _apiUrl = prefs.getString(kPrefsApiUrl) ?? 'http://127.0.0.1:8766';
@@ -345,7 +365,8 @@ class AppState extends ChangeNotifier {
   /// Reloads [_notes] from the local SQLite store, applying the same
   /// notebook/search filters the backend would. Used by the local-mode CRUD
   /// paths so list views stay in sync with on-device data.
-  Future<void> _refreshLocalNotes({String? notebookId, String? search}) async {
+  Future<List<api.Note>> _queryLocalNotes(
+      {String? notebookId, String? search}) async {
     await _ensureLocalReady();
     final snapshot = await _localService.exportAllData();
     Iterable<local.Note> notes = snapshot.notes.where((n) => !n.isDeleted);
@@ -356,8 +377,7 @@ class AppState extends ChangeNotifier {
     if (query != null && query.isNotEmpty) {
       notes = notes.where((n) => n.title.toLowerCase().contains(query));
     }
-    _notes = notes.map(_toApiNote).toList();
-    _hasLocalData = _notebooks.isNotEmpty || _notes.isNotEmpty;
+    return notes.map(_toApiNote).toList();
   }
 
   api.Notebook _toApiNotebook(local.Notebook n) => api.Notebook(
@@ -475,19 +495,35 @@ class AppState extends ChangeNotifier {
     loadNotes(notebookId: nb?.id);
   }
 
+  /// Reloads the notes list. [search] replaces the active search query when
+  /// given; otherwise the current one is kept, so a reload triggered by a
+  /// rename or a notebook switch doesn't silently drop the user's filter.
+  ///
+  /// Only the latest call may publish its result: with a slow backend, the
+  /// results for "gr" could otherwise arrive after those for "groc".
   Future<void> loadNotes({String? notebookId, String? search}) async {
+    if (search != null) _searchQuery = search;
+    final query = _searchQuery;
+    final request = ++_notesRequest;
     _isLoading = true;
     notifyListeners();
     if (_localMode) {
-      await _refreshLocalNotes(notebookId: notebookId, search: search);
+      final notes =
+          await _queryLocalNotes(notebookId: notebookId, search: query);
+      if (request != _notesRequest) return;
+      _notes = notes;
+      _hasLocalData = _notebooks.isNotEmpty || _notes.isNotEmpty;
       _isLoading = false;
       notifyListeners();
       return;
     }
     try {
-      _notes = await client.getNotes(notebookId: notebookId, search: search);
+      final notes = await client.getNotes(notebookId: notebookId, search: query);
+      if (request != _notesRequest) return;
+      _notes = notes;
       _markBackendAvailable();
     } catch (e) {
+      if (request != _notesRequest) return;
       await _handleBackendFailure(e);
     }
     _isLoading = false;
@@ -635,6 +671,17 @@ class AppState extends ChangeNotifier {
   }
 
   void selectNote(api.Note? note) { _selectedNote = note; notifyListeners(); }
+
+  /// Loads note [id] with its content and selects it. Returns null when the
+  /// user picked another note before this one finished loading, so a slow
+  /// load can't replace the newer selection.
+  Future<api.Note?> openNote(String id) async {
+    final request = ++_openRequest;
+    final full = await getNote(id);
+    if (request != _openRequest) return null;
+    selectNote(full);
+    return full;
+  }
 
   Future<String> triggerSync() async {
     if (_localMode) {

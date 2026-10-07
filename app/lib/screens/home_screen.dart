@@ -59,16 +59,17 @@ class _DesktopLayout extends StatelessWidget {
             notes: state.notes,
             selected: state.selectedNote,
             isLoading: state.isLoading,
-            onSelect: (note) async {
-              final full = await state.getNote(note.id);
-              state.selectNote(full);
-            },
+            onSelect: (note) => _openNote(context, note.id),
             onDelete: (note) => state.deleteNote(note.id),
           )),
         ])),
         VerticalDivider(width: 1, color: scheme.outlineVariant),
         Expanded(child: state.selectedNote != null
-          ? NoteEditorScreen(note: state.selectedNote!)
+          // Keyed by note id: without it Flutter reuses the editor State
+          // and keeps showing (and saving to) the previously opened note.
+          ? NoteEditorScreen(
+              key: ValueKey(state.selectedNote!.id),
+              note: state.selectedNote!)
           : _EmptyEditor()),
       ])),
       ]),
@@ -85,14 +86,30 @@ class _DesktopLayout extends StatelessWidget {
   Future<void> _createNote(BuildContext context) async {
     final state = context.read<AppState>();
     final note = await state.createNote(title: 'Untitled', noteType: 'typed');
-    final full = await state.getNote(note.id);
-    state.selectNote(full);
+    if (context.mounted) await _openNote(context, note.id);
   }
 
   Future<void> _sync(BuildContext context) async {
     final state = context.read<AppState>();
     await state.triggerSync();
     if (context.mounted) _showSyncResult(context, state);
+  }
+}
+
+/// Opens note [id] and returns it, or null when it is stale (another note was
+/// picked meanwhile) or could not be loaded; the error is shown to the user
+/// instead of the tap silently doing nothing.
+Future<Note?> _openNote(BuildContext context, String id) async {
+  try {
+    return await context.read<AppState>().openNote(id);
+  } catch (e) {
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text('Could not open note: $e'),
+        backgroundColor: Colors.red.shade700,
+      ));
+    }
+    return null;
   }
 }
 
@@ -144,9 +161,8 @@ class _MobileLayout extends StatelessWidget {
           selected: state.selectedNote,
           isLoading: state.isLoading,
           onSelect: (note) async {
-            final full = await state.getNote(note.id);
-            state.selectNote(full);
-            if (context.mounted) {
+            final full = await _openNote(context, note.id);
+            if (full != null && context.mounted) {
               Navigator.push(context, MaterialPageRoute(
                 builder: (_) => ChangeNotifierProvider.value(
                   value: state,
@@ -178,9 +194,9 @@ class _MobileLayout extends StatelessWidget {
         foregroundColor: Colors.white,
         onPressed: () async {
           final note = await state.createNote(title: 'Untitled', noteType: 'typed');
-          final full = await state.getNote(note.id);
-          state.selectNote(full);
-          if (context.mounted) {
+          if (!context.mounted) return;
+          final full = await _openNote(context, note.id);
+          if (full != null && context.mounted) {
             Navigator.push(context, MaterialPageRoute(
               builder: (_) => ChangeNotifierProvider.value(
                 value: state,

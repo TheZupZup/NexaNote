@@ -28,7 +28,7 @@ class NexaNoteApp extends StatelessWidget {
       themeMode: ThemeMode.system,
       home: Consumer<AppState>(
         builder: (context, state, _) {
-          if (state.isLoading) {
+          if (state.isStarting) {
             return const _SplashScreen();
           }
           // First launch only: offer "Use offline" or "Connect to a server".
