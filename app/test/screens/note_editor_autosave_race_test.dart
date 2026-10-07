@@ -134,4 +134,27 @@ void main() {
 
     expect(backend.landed.last, 'draft final');
   });
+
+  for (final lifecycle in [
+    AppLifecycleState.inactive,
+    AppLifecycleState.hidden,
+    AppLifecycleState.paused,
+  ]) {
+    testWidgets('going to the background ($lifecycle) saves pending text '
+        'right away', (tester) async {
+      await pumpEditor(tester);
+
+      await tester.enterText(body(), 'typed just before switching apps');
+      await tester.pump();
+      expect(backend.started, isEmpty); // still inside the 2s debounce
+
+      // Android may kill a backgrounded app without running more Dart code,
+      // so the save can't wait for the debounce timer.
+      tester.binding.handleAppLifecycleStateChanged(lifecycle);
+      await tester.pump();
+      await releaseAll(tester);
+
+      expect(backend.landed, ['typed just before switching apps']);
+    });
+  }
 }

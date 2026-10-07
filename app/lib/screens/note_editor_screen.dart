@@ -12,7 +12,8 @@ class NoteEditorScreen extends StatefulWidget {
   State<NoteEditorScreen> createState() => _NoteEditorScreenState();
 }
 
-class _NoteEditorScreenState extends State<NoteEditorScreen> {
+class _NoteEditorScreenState extends State<NoteEditorScreen>
+    with WidgetsBindingObserver {
   late TextEditingController _titleCtrl;
   late TextEditingController _contentCtrl;
   Timer? _saveTimer;
@@ -64,6 +65,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
         : <Map<String, dynamic>>[];
     _savedTitle = _titleCtrl.text;
     _savedContent = _contentCtrl.text;
+    WidgetsBinding.instance.addObserver(this);
     _titleCtrl.addListener(_onChanged);
     _contentCtrl.addListener(_onChanged);
   }
@@ -231,8 +233,20 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     if (isMobile && mounted) Navigator.pop(context);
   }
 
+  /// Android can kill a backgrounded app without running any more Dart
+  /// code, and closing a desktop window doesn't dispose widgets either, so
+  /// pending text can't wait for the debounce timer once the app leaves the
+  /// foreground.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) return;
+    _saveTimer?.cancel();
+    if (_hasChanges) _save();
+  }
+
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _saveTimer?.cancel();
     // Flush pending text edits. The save is queued behind any in-flight one
     // and only uses the captured AppState, so it is safe after unmount.
