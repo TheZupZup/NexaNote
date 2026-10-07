@@ -756,6 +756,21 @@ void main() {
       expect(stub.createNoteCalls, 1, reason: 'already uploaded, not again');
     });
 
+    test('two quick connects upload an offline note only once', () async {
+      final stub = _FlakyUploadApi()..failuresLeft = 0;
+      final s = AppState(localService: service, clientFactory: (_) => stub);
+      await s.enableLocalMode();
+      final note = await s.createNote(title: 'Offline', noteType: 'typed');
+      await s.savePageText(note.id, 1, 'body');
+
+      await Future.wait([
+        s.connect(url: 'http://192.0.2.10:8766'),
+        s.connect(url: 'http://192.0.2.10:8766'),
+      ]);
+
+      expect(stub.createNoteCalls, 1);
+    });
+
     test('existing connected users are not reset to onboarding or local mode',
         () async {
       // Simulates an upgrade from a pre-local-mode build: the only persisted

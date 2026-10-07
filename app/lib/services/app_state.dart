@@ -62,6 +62,7 @@ class AppState extends ChangeNotifier {
   String? _searchQuery;
   int _notesRequest = 0;
   int _openRequest = 0;
+  Future<void>? _localUpload;
   bool _isSyncing = false;
   String? _syncMessage;
   String? _syncError;
@@ -241,7 +242,13 @@ class AppState extends ChangeNotifier {
   /// Already-uploaded notes are marked synced, so a retry doesn't duplicate
   /// them. A failure never blocks the connection, but it is reported through
   /// [syncError] instead of being dropped silently.
-  Future<void> _uploadPendingLocalNotes() async {
+  Future<void> _uploadPendingLocalNotes() =>
+      // One upload at a time: two quick Reconnects would otherwise both see
+      // the same pending notes and create each of them twice on the server.
+      _localUpload ??=
+          _uploadPendingLocalNotesOnce().whenComplete(() => _localUpload = null);
+
+  Future<void> _uploadPendingLocalNotesOnce() async {
     try {
       final snapshot = await _localService.exportAllData();
       final pending = snapshot.notebooks.any((n) => n.syncStatus != 'synced') ||
