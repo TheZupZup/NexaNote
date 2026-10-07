@@ -88,12 +88,21 @@ def _now() -> datetime:
 
 
 def _parse_dt(value) -> datetime:
-    """Parse an ISO datetime string (or pass through datetime)."""
+    """Parse an ISO datetime string (or pass through datetime).
+
+    Timestamps without a timezone (hand-edited frontmatter, YAML's
+    `2024-01-01 10:00`) are read as UTC: mixing naive and aware datetimes
+    makes comparisons and sorts raise.
+    """
     if isinstance(value, datetime):
-        return value
-    if isinstance(value, str):
-        return datetime.fromisoformat(value)
-    raise TypeError(f"cannot parse datetime from {type(value).__name__}")
+        parsed = value
+    elif isinstance(value, str):
+        parsed = datetime.fromisoformat(value)
+    else:
+        raise TypeError(f"cannot parse datetime from {type(value).__name__}")
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
 
 
 def _fmt_dt(dt: datetime) -> str:
@@ -552,7 +561,9 @@ class FileNoteStore:
         for path in sorted(self.notebooks_dir.glob("*.yaml")):
             try:
                 nb = deserialize_notebook(path.read_text(encoding="utf-8"))
-            except OSError as exc:
+            except Exception as exc:
+                # One unreadable or malformed file must not hide every other
+                # notebook. The file itself is left untouched.
                 logger.warning(f"skip unreadable notebook {path}: {exc}")
                 continue
             if nb is None:
@@ -660,14 +671,9 @@ class FileNoteStore:
         out: list[Note] = []
         needle = search_title.lower() if search_title else None
         for path in self.notes_dir.glob("*.md"):
-            try:
-                md_text = path.read_text(encoding="utf-8")
-            except OSError as exc:
-                logger.warning(f"skip unreadable note {path}: {exc}")
-                continue
-            note = deserialize_note(md_text, None)
+            note = self._read_listed_note(path)
             if note is None:
-                note = synthesize_plain_md_note(path, md_text)
+                continue
             note.pages = []  # listings are metadata-only
 
             if not include_deleted and note.is_deleted:
@@ -682,6 +688,25 @@ class FileNoteStore:
 
         out.sort(key=lambda n: n.updated_at, reverse=True)
         return out
+
+    @staticmethod
+    def _read_listed_note(path: Path) -> Optional[Note]:
+        """
+        EN: Read one note for a listing, or None (logged) if the file can't be
+            read or parsed: invalid UTF-8, malformed frontmatter, unknown
+            enum values... One bad file used to make GET /notes, /stats and
+            the sync push fail as a whole. The file itself is left untouched.
+        FR: Lit une note pour un listing ; None si le fichier est illisible.
+        """
+        try:
+            md_text = path.read_text(encoding="utf-8")
+            note = deserialize_note(md_text, None)
+            if note is None:
+                note = synthesize_plain_md_note(path, md_text)
+            return note
+        except Exception as exc:
+            logger.warning(f"skip unreadable note {path}: {exc}")
+            return None
 
     def delete_note_permanent(self, note_id: str) -> None:
         """Permanent delete (purge from trash)."""
@@ -779,13 +804,9 @@ class FileNoteStore:
             notebooks += 1
 
         for path in self.notes_dir.glob("*.md"):
-            try:
-                md_text = path.read_text(encoding="utf-8")
-            except OSError:
-                continue
-            note = deserialize_note(md_text, None)
+            note = self._read_listed_note(path)
             if note is None:
-                note = synthesize_plain_md_note(path, md_text)
+                continue
             if note.is_deleted:
                 notes_deleted += 1
                 continue
