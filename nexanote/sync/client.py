@@ -15,6 +15,7 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -887,6 +888,16 @@ def _make_local_conflict_copy(local: Note) -> Note:
     return conflict_copy
 
 
+_SYNC_LOCKS: dict[str, threading.Lock] = {}
+_SYNC_LOCKS_GUARD = threading.Lock()
+
+
+def _sync_lock_for(data_dir: Path) -> threading.Lock:
+    key = str(Path(data_dir).resolve())
+    with _SYNC_LOCKS_GUARD:
+        return _SYNC_LOCKS.setdefault(key, threading.Lock())
+
+
 class NexaNoteSyncEngine:
     """
     Moteur de synchronisation principal.
@@ -951,6 +962,26 @@ class NexaNoteSyncEngine:
     # ------------------------------------------------------------------
 
     def sync(self) -> SyncReport:
+        """
+        EN: Run a sync session unless one is already running on the same data
+            directory (two quick taps on "Sync", a manual sync during an
+            automatic one). Overlapping sessions resolved the same conflicts
+            twice and wrote duplicate conflict copies.
+        FR: Refuse une session concurrente sur le même dossier de données.
+        """
+        lock = _sync_lock_for(self.db.data_dir)
+        if not lock.acquire(blocking=False):
+            report = SyncReport()
+            report.dry_run = self.dry_run
+            report.errors.append("Une synchronisation est déjà en cours")
+            report.finish()
+            return report
+        try:
+            return self._sync()
+        finally:
+            lock.release()
+
+    def _sync(self) -> SyncReport:
         """
         EN: Run a full sync session: ping → pull → push. The ``SyncPlan`` is
             built as decisions are made; in dry-run no files, sync state, or

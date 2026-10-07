@@ -774,3 +774,52 @@ class TestRetryableSyncReport:
         # The retried PUT is still visible in the diagnostics (2 attempts).
         assert any(a["operation"] == "PUT" and a["attempts"] == 2
                    for a in report.operation_attempts)
+
+
+class TestOverlappingSyncs:
+    def test_second_sync_on_same_data_dir_is_refused_while_one_runs(self, tmp_path):
+        import threading
+
+        layout = {
+            "carnet__01234567": {
+                f"remote__{REAL_ID[:8]}": _meta(
+                    REAL_ID, "Doc", "REMOTE-EDIT", "2026-06-01T00:00:00+00:00"
+                ),
+            }
+        }
+        first, stub = _make_engine(tmp_path / "client", layout)
+        local = Note(id=REAL_ID, title="Doc", note_type=NoteType.TYPED)
+        local.add_page().typed_content = "LOCAL-EDIT"
+        local.updated_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        local.pages[0].updated_at = local.updated_at
+        local.sync_status = SyncStatus.MODIFIED
+        first.db.save_note(local)
+
+        in_pull = threading.Event()
+        release = threading.Event()
+        real_get_meta = stub.get_note_meta
+
+        def slow_get_meta(nb, note):
+            in_pull.set()
+            release.wait(5)
+            return real_get_meta(nb, note)
+
+        stub.get_note_meta = slow_get_meta
+        reports = {}
+        t = threading.Thread(target=lambda: reports.setdefault("first", first.sync()))
+        t.start()
+        assert in_pull.wait(5)
+
+        second, _ = _make_engine(tmp_path / "client", layout)
+        reports["second"] = second.sync()
+        release.set()
+        t.join(5)
+
+        assert not reports["second"].success()
+        assert "déjà en cours" in reports["second"].errors[0]
+        assert reports["first"].success(), reports["first"].errors
+        titles = [n.title for n in first.db.list_notes(include_archived=True)]
+        assert sum("conflit" in t for t in titles) == 1, titles
+
+        # Once the first one is done, syncing works again.
+        assert _make_engine(tmp_path / "client", layout)[0].sync().success()
