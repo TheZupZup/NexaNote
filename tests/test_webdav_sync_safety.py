@@ -314,3 +314,137 @@ def test_locally_deleted_note_does_not_conflict_on_every_sync(tmp_path, server, 
 
     assert conflicts[1:] == [0, 0]
     assert db.get_note(note.id).is_deleted
+
+
+# ---------------------------------------------------------------------------
+# note.json PUT with an id that differs from the note at that path. Only a
+# stand-in note the server created itself (MKCOL, or a PUT into a missing
+# path) may be replaced; a real note, even empty and sharing the 8-char id
+# prefix, must be left alone.
+# ---------------------------------------------------------------------------
+
+AUTH = ("user", "pass")
+REAL_ID = "abcd1234-0000-4000-8000-000000000001"
+CLIENT_ID = "abcd1234-9999-4999-9999-999999999999"  # same 8-char prefix
+
+
+def _uncategorized(sdb):
+    return [n for n in sdb.list_notebooks() if n.id.startswith("00000000")][0]
+
+
+def _put_meta(server, path, note_id, text="client text", title="Doc"):
+    body = {"id": note_id, "title": title, "type": "typed",
+            "pages": [{"page_number": 1, "typed_content": text}]}
+    return requests.put(server["url"] + path + "/note.json", json=body,
+                        auth=AUTH, timeout=5)
+
+
+def _mkcol(server, path):
+    return requests.request("MKCOL", server["url"] + path, auth=AUTH, timeout=5)
+
+
+def test_empty_real_note_with_same_id_prefix_is_not_taken_for_a_placeholder(server):
+    sdb = server["db"]
+    real = Note(id=REAL_ID, title="Empty", notebook_id=_uncategorized(sdb).id)
+    real.add_page()
+    sdb.save_note(real)
+
+    resp = _put_meta(server, "uncategorized/empty__abcd1234", CLIENT_ID)
+
+    assert resp.status_code == 409
+    kept = sdb.get_note(REAL_ID, load_pages=True)
+    assert kept is not None and kept.title == "Empty"
+    assert sdb.get_note(CLIENT_ID) is None
+
+
+def test_real_note_content_survives_an_id_mismatch(server):
+    sdb = server["db"]
+    real = Note(id=REAL_ID, title="Kept", notebook_id=_uncategorized(sdb).id)
+    page = real.add_page()
+    page.typed_content = "precious text"
+    page.strokes.append(InkStroke(points=[Point(1, 1), Point(2, 2)]))
+    sdb.save_note(real)
+
+    resp = _put_meta(server, "uncategorized/kept__abcd1234", CLIENT_ID)
+
+    assert resp.status_code == 409
+    kept = sdb.get_note(REAL_ID, load_pages=True)
+    assert kept.pages[0].typed_content == "precious text"
+    assert len(kept.pages[0].strokes) == 1
+
+
+def test_mkcol_placeholder_is_claimed_by_the_clients_note_json(server):
+    sdb = server["db"]
+    assert _mkcol(server, "uncategorized/doc__abcd1234").status_code in (200, 201)
+
+    resp = _put_meta(server, "uncategorized/doc__abcd1234", CLIENT_ID)
+
+    assert resp.status_code < 300
+    claimed = sdb.get_note(CLIENT_ID, load_pages=True)
+    assert claimed.pages[0].typed_content == "client text"
+    # The stand-in is gone, not left behind as a second note.
+    titles = [n.title for n in sdb.list_notes(include_archived=True)]
+    assert titles.count("Doc") == 1
+
+
+def test_placeholder_claim_survives_a_server_restart(tmp_path, server):
+    sdb = server["db"]
+    assert _mkcol(server, "uncategorized/doc__abcd1234").status_code in (200, 201)
+
+    # New server process on the same data directory.
+    restarted_db = FileNoteStore(sdb.data_dir)
+    app = build_app(restarted_db, username="user", password="pass", verbose=False)
+    port = _free_port()
+    httpd = cheroot_wsgi.Server(bind_addr=("127.0.0.1", port), wsgi_app=app, numthreads=2)
+    threading.Thread(target=httpd.start, daemon=True).start()
+    try:
+        url = f"http://127.0.0.1:{port}/"
+        for _ in range(100):
+            try:
+                requests.options(url, timeout=1)
+                break
+            except requests.RequestException:
+                time.sleep(0.05)
+        resp = _put_meta({"url": url}, "uncategorized/doc__abcd1234", CLIENT_ID)
+    finally:
+        httpd.stop()
+
+    assert resp.status_code < 300
+    assert restarted_db.get_note(CLIENT_ID) is not None
+
+
+def test_drawing_uploaded_before_note_json_is_kept_on_claim(server):
+    sdb = server["db"]
+    assert _mkcol(server, "uncategorized/sketch__abcd1234").status_code in (200, 201)
+    ink = {"strokes": [{"id": "s1", "points": [{"x": 1, "y": 1}, {"x": 2, "y": 2}]}]}
+    r = requests.put(server["url"] + "uncategorized/sketch__abcd1234/page_1.ink",
+                     json=ink, auth=AUTH, timeout=5)
+    assert r.status_code < 300
+
+    resp = _put_meta(server, "uncategorized/sketch__abcd1234", CLIENT_ID, title="Sketch")
+
+    assert resp.status_code < 300
+    claimed = sdb.get_note(CLIENT_ID, load_pages=True)
+    assert len(claimed.pages[0].strokes) == 1
+
+
+def test_claiming_with_an_id_that_already_exists_keeps_its_drawing(server):
+    sdb = server["db"]
+    other_nb = Notebook(name="Elsewhere")
+    sdb.save_notebook(other_nb)
+    existing = Note(id=CLIENT_ID, title="Doc", notebook_id=other_nb.id)
+    page = existing.add_page()
+    page.typed_content = "old text"
+    page.strokes.append(InkStroke(points=[Point(1, 1), Point(2, 2)]))
+    sdb.save_note(existing)
+    # The client moved the note: it lands in a folder where it isn't found,
+    # so MKCOL mints a placeholder for it there.
+    assert _mkcol(server, "uncategorized/doc__abcd1234").status_code in (200, 201)
+
+    resp = _put_meta(server, "uncategorized/doc__abcd1234", CLIENT_ID, text="new text")
+
+    assert resp.status_code < 300
+    note = sdb.get_note(CLIENT_ID, load_pages=True)
+    assert note.pages[0].typed_content == "new text"
+    assert len(note.pages[0].strokes) == 1
+    assert note.notebook_id == _uncategorized(sdb).id

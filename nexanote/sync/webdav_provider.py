@@ -21,8 +21,10 @@ import io
 import json
 import logging
 import re
+import threading
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 from wsgidav.dav_provider import DAVCollection, DAVNonCollection, DAVProvider
@@ -40,7 +42,7 @@ HTTP_INTERNAL_ERROR = getattr(_dav_error, "HTTP_INTERNAL_ERROR", 500)
 HTTP_BAD_REQUEST = getattr(_dav_error, "HTTP_BAD_REQUEST", 400)
 
 from nexanote.models.note import InkStroke, Note, Notebook, NoteType, Page, Point
-from nexanote.storage.file_store import FileNoteStore
+from nexanote.storage.file_store import FileNoteStore, _atomic_write
 
 logger = logging.getLogger("nexanote.webdav")
 
@@ -302,6 +304,7 @@ class NotebookCollection(DAVCollection):
                 title=title,
             )
             note.add_page()
+            _placeholders(self.db).add(note.id)
             self.db.save_note(note)
         except Exception as exc:
             logger.exception("MKCOL note failed: %s", name)
@@ -583,6 +586,7 @@ class _NoteMetaWriter(io.RawIOBase):
             # only the slug's 8-char prefix), drop the placeholder so the
             # client's full id wins. Without this the on-disk file id would
             # diverge from the client's id and break future updates.
+            placeholder_id: Optional[str] = None
             payload_id = payload.get("id")
             if (
                 isinstance(payload_id, str)
@@ -590,28 +594,30 @@ class _NoteMetaWriter(io.RawIOBase):
                 and payload_id != self.note.id
             ):
                 # EN: The note behind this path can also be a real note found
-                #     by the title-slug or id-prefix fallbacks. Only an empty
-                #     MKCOL placeholder minted from this same id prefix may be
-                #     replaced; deleting anything else would destroy a note
-                #     (and its drawings) because another client wrote to a
-                #     colliding path.
-                # FR: Seul un placeholder vide créé par MKCOL avec le même
-                #     préfixe d'ID peut être remplacé.
-                if not _is_placeholder_for(self.note, payload_id):
+                #     by the title-slug or id-prefix fallbacks, and a real
+                #     note can be empty and share the 8-char prefix. Only a
+                #     note this server recorded as an MKCOL placeholder may be
+                #     replaced; anything else gets a 409.
+                # FR: Seul un placeholder enregistré lors du MKCOL peut être
+                #     remplacé ; une vraie note (même vide) donne un 409.
+                if not _is_placeholder_for(self.db, self.note, payload_id):
                     raise DAVError(
                         HTTP_CONFLICT,
                         context_info="note.json id does not match the note at this path",
                     )
-                old_id = self.note.id
-                self.note.id = payload_id
-                for page in self.note.pages:
-                    page.note_id = payload_id
-                try:
-                    self.db.delete_note_permanent(old_id)
-                except Exception:
-                    logger.warning(
-                        "could not delete placeholder note %s — ignoring", old_id
-                    )
+                placeholder_id = self.note.id
+                existing = self.db.get_note(payload_id, load_pages=True)
+                if existing is not None:
+                    # The client's note already exists here (e.g. it moved to
+                    # this notebook): update it, keeping its pages and
+                    # drawings, instead of overwriting it with the
+                    # placeholder's empty ones.
+                    existing.notebook_id = self.note.notebook_id
+                    self.note = existing
+                else:
+                    self.note.id = payload_id
+                    for page in self.note.pages:
+                        page.note_id = payload_id
 
             self.note.title = payload.get("title", self.note.title)
             self.note.tags = payload.get("tags", self.note.tags) or []
@@ -644,6 +650,16 @@ class _NoteMetaWriter(io.RawIOBase):
             if not _apply_client_timestamp(self.note, payload.get("updated_at")):
                 self.note.touch()
             self.db.save_note(self.note)
+            if placeholder_id is not None:
+                # Only now that the note is saved under its real id.
+                try:
+                    self.db.delete_note_permanent(placeholder_id)
+                except Exception:
+                    logger.warning(
+                        "could not delete placeholder note %s — ignoring",
+                        placeholder_id,
+                    )
+                _placeholders(self.db).remove(placeholder_id)
             logger.info("Note mise à jour via WebDAV PUT : %s", self.note.title)
         except DAVError:
             raise
@@ -652,11 +668,66 @@ class _NoteMetaWriter(io.RawIOBase):
             raise _safe_dav_error(exc, "saving note failed") from exc
 
 
-def _is_placeholder_for(note: Note, payload_id: str) -> bool:
-    """True for the empty note MKCOL creates ahead of a client's note.json."""
-    if note.id[:8] != payload_id[:8]:
-        return False
-    return all(not p.typed_content and not p.strokes for p in note.pages)
+def _is_placeholder_for(db: FileNoteStore, note: Note, payload_id: str) -> bool:
+    """
+    True only for a note this server created itself as a stand-in (MKCOL, or
+    a PUT into a path that didn't exist yet) for the client note
+    `payload_id`. Being empty and sharing the id prefix is not enough: a real
+    note can be both.
+    """
+    return note.id[:8] == payload_id[:8] and _placeholders(db).contains(note.id)
+
+
+class _PlaceholderRegistry:
+    """
+    EN: Ids of the stand-in notes created ahead of a client's note.json,
+        persisted in the data directory so a server restart between MKCOL
+        and PUT doesn't turn the placeholder into an unclaimable note.
+    FR: Ids des notes provisoires créées avant le note.json du client,
+        persistés pour survivre à un redémarrage.
+    """
+
+    FILE_NAME = ".webdav_placeholders.json"
+    _lock = threading.Lock()
+
+    def __init__(self, data_dir: Path) -> None:
+        self.path = Path(data_dir) / self.FILE_NAME
+
+    def _read(self) -> set[str]:
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return set()
+        except (OSError, ValueError) as exc:
+            # Unreadable registry: claim nothing. A placeholder then gets a
+            # 409 instead of a real note possibly being replaced.
+            logger.warning("unreadable placeholder registry %s: %s", self.path, exc)
+            return set()
+        return {i for i in data if isinstance(i, str)} if isinstance(data, list) else set()
+
+    def _write(self, ids: set[str]) -> None:
+        _atomic_write(self.path, json.dumps(sorted(ids)).encode("utf-8"))
+
+    def add(self, note_id: str) -> None:
+        with self._lock:
+            ids = self._read()
+            ids.add(note_id)
+            self._write(ids)
+
+    def remove(self, note_id: str) -> None:
+        with self._lock:
+            ids = self._read()
+            if note_id in ids:
+                ids.discard(note_id)
+                self._write(ids)
+
+    def contains(self, note_id: str) -> bool:
+        with self._lock:
+            return note_id in self._read()
+
+
+def _placeholders(db: FileNoteStore) -> _PlaceholderRegistry:
+    return _PlaceholderRegistry(db.data_dir)
 
 
 def _apply_client_timestamp(obj, value) -> bool:
@@ -961,6 +1032,7 @@ def _materialize_note(
             title=title,
         )
         note.add_page()
+        _placeholders(db).add(note.id)
         db.save_note(note)
     except Exception:
         logger.exception("auto-materialize note failed: %s", slug)
