@@ -89,6 +89,9 @@ class PageSchema(BaseModel):
     typed_content: str = ""
     strokes: list[StrokeSchema] = Field(default_factory=list)
     updated_at: Optional[str] = None
+    # The note's updated_at right after a page save, so a client resuming an
+    # interrupted upload can tell its own writes from someone else's.
+    note_updated_at: Optional[str] = None
 
 
 class NoteCreateSchema(BaseModel):
@@ -241,8 +244,9 @@ def _note_to_schema(note: Note, include_pages: bool = False) -> NoteSchema:
     )
 
 
-def _page_to_schema(page: Page) -> PageSchema:
+def _page_to_schema(page: Page, note: Optional[Note] = None) -> PageSchema:
     return PageSchema(
+        note_updated_at=note.updated_at.isoformat() if note else None,
         page_number=page.page_number,
         template=page.template,
         width_px=page.width_px,
@@ -562,7 +566,7 @@ def create_app(db: FileNoteStore) -> FastAPI:
         note.touch()
         db.save_page(page)
         db.save_note(note, save_pages=False)
-        return _page_to_schema(page)
+        return _page_to_schema(page, note)
 
     @app.put("/notes/{note_id}/pages/{page_num}/text", response_model=PageSchema)
     @_locked_by_note
@@ -580,7 +584,7 @@ def create_app(db: FileNoteStore) -> FastAPI:
         note.touch()
         db.save_page(page)
         db.save_note(note, save_pages=False)
-        return _page_to_schema(page)
+        return _page_to_schema(page, note)
 
     # ------------------------------------------------------------------
     # Sync

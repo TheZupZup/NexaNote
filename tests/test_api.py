@@ -330,3 +330,15 @@ class TestInputValidation:
             "server_url": "http://nas.local/", "conflict_strategy": "keep_both",
         })
         assert ok.status_code == 200
+
+
+class TestPageSaveReportsNoteVersion:
+    def test_text_and_ink_saves_return_the_notes_new_updated_at(self, client):
+        nid = client.post("/notes", json={"title": "x"}).json()["id"]
+
+        text = client.put(f"/notes/{nid}/pages/1/text", json={"typed_content": "a"}).json()
+        assert text["note_updated_at"] == client.get(f"/notes/{nid}").json()["updated_at"]
+
+        ink = client.put(f"/notes/{nid}/pages/1/ink", json={"strokes": []}).json()
+        assert ink["note_updated_at"] == client.get(f"/notes/{nid}").json()["updated_at"]
+        assert ink["note_updated_at"] != text["note_updated_at"]
