@@ -260,3 +260,57 @@ def test_put_with_a_foreign_id_does_not_delete_the_note_at_that_path(server):
     assert kept is not None
     assert kept.pages[0].typed_content == "victim text"
     assert len(kept.pages[0].strokes) == 1
+
+
+def _fail_get(engine, suffix, status=500):
+    real_get = engine.client.session.get
+
+    def get(url, *args, **kwargs):
+        if url.endswith(suffix):
+            resp = requests.Response()
+            resp.status_code = status
+            resp.reason = "Internal Server Error"
+            resp._content = b"boom"
+            return resp
+        return real_get(url, *args, **kwargs)
+
+    engine.client.session.get = get
+
+
+@pytest.mark.parametrize("failing_file", ["note.json", "page_1.ink"])
+def test_failed_note_read_does_not_let_push_overwrite_it(tmp_path, server, engine_for, failing_file):
+    a = FileNoteStore(tmp_path / "deviceA")
+    b = FileNoteStore(tmp_path / "deviceB")
+    note = _new_note(a)
+    assert engine_for(a).sync().success()
+    assert engine_for(b).sync().success()
+
+    _edit_text(a, note.id, "A older edit")
+    time.sleep(0.01)
+    _edit_text(b, note.id, "B newer edit")
+    assert engine_for(b).sync().success()
+
+    engine = engine_for(a)
+    _fail_get(engine, failing_file)
+    report = engine.sync()
+
+    assert not report.success()
+    assert _server_text(server["db"], note.id) == "B newer edit"
+    # A's edit is still pending and goes through the conflict path next time.
+    assert db_text(a, note.id) == "A older edit"
+    assert a.get_note(note.id).sync_status != SyncStatus.SYNCED
+
+
+def test_locally_deleted_note_does_not_conflict_on_every_sync(tmp_path, server, engine_for):
+    db = FileNoteStore(tmp_path / "device")
+    note = _new_note(db, title="Trash me")
+    assert engine_for(db).sync().success()
+
+    deleted = db.get_note(note.id, load_pages=False)
+    deleted.soft_delete()
+    db.save_note(deleted, save_pages=False)
+
+    conflicts = [engine_for(db).sync().conflicts_resolved for _ in range(3)]
+
+    assert conflicts[1:] == [0, 0]
+    assert db.get_note(note.id).is_deleted

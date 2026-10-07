@@ -438,13 +438,18 @@ class WebDAVClient:
         resp = self._execute(
             "GET", path, lambda: self.session.get(url, timeout=self.config.timeout_seconds)
         )
-        if resp is None or resp.status_code != 200:
+        # Only a 404 means the note is gone; any other failure must not be
+        # mistaken for it, or push would overwrite the version we failed
+        # to read.
+        if resp is not None and resp.status_code == 404:
             return None
+        if resp is None or resp.status_code != 200:
+            status = "no response" if resp is None else resp.status_code
+            raise RemoteReadError(f"GET {path} failed ({status})")
         try:
             return resp.json()
         except ValueError as e:
-            logger.error(f"GET note.json invalid JSON ({path}): {e}")
-            return None
+            raise RemoteReadError(f"GET {path} returned invalid JSON: {e}") from e
 
     def get_ink_page(self, notebook_slug: str, note_slug: str, page_num: int) -> Optional[dict]:
         """GET /{notebook}/{note}/page_N.ink (avec retry transitoire)."""
@@ -829,6 +834,11 @@ def _serialize_note_meta(note: Note) -> dict:
     }
 
 
+def _slug_id_prefix(note_slug: str) -> str:
+    """The note id prefix a `<title>__<id[:8]>` slug ends with."""
+    return note_slug.rsplit("__", 1)[-1]
+
+
 def _carry_local_fields(remote: Note, local: Note) -> None:
     """
     EN: note.json does not carry the notebook or the archived/deleted flags,
@@ -994,6 +1004,7 @@ class NexaNoteSyncEngine:
         report = SyncReport()
         report.dry_run = self.dry_run
         self._unreadable_notebooks: set[str] = set()
+        self._unreadable_note_prefixes: set[str] = set()
         self.plan = SyncPlan()
         report.plan = self.plan
         logger.info(
@@ -1131,6 +1142,9 @@ class NexaNoteSyncEngine:
             try:
                 self._pull_note(nb_slug, note_slug, report)
             except Exception as e:
+                # This note was not compared with the server, so pushing the
+                # local copy could overwrite a newer remote version.
+                self._unreadable_note_prefixes.add(_slug_id_prefix(note_slug))
                 msg = f"Erreur pull note {note_slug}: {e}"
                 logger.error(msg)
                 report.errors.append(msg)
@@ -1298,7 +1312,9 @@ class NexaNoteSyncEngine:
             # is the remote version as-is (local edits kept in a conflict
             # copy, if any), it holds changes the server doesn't have yet.
             # Leave it MODIFIED so this sync's push uploads them.
-            if result.winner is not remote_note:
+            # A deleted winner stays as resolved: push never sends deleted
+            # notes, so MODIFIED would re-run this conflict on every sync.
+            if result.winner is not remote_note and not result.winner.is_deleted:
                 result.winner.sync_status = SyncStatus.MODIFIED
 
             # A genuine conflict = both sides changed. The resolver reports
@@ -1414,6 +1430,12 @@ class NexaNoteSyncEngine:
             report.errors.append(
                 f"Échec partiel push : {note.title} — notebook {nb_slug} "
                 f"could not be listed, push skipped"
+            )
+            return
+        if note.id[:8] in getattr(self, "_unreadable_note_prefixes", ()):
+            report.errors.append(
+                f"Échec partiel push : {note.title} — remote copy could not "
+                f"be read, push skipped"
             )
             return
 
