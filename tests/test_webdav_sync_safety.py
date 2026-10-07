@@ -465,3 +465,89 @@ def test_placeholder_edited_by_a_user_is_not_overwritten_on_claim(server):
     assert resp.status_code == 409
     kept = sdb.get_note(placeholder.id, load_pages=True)
     assert kept.pages[0].typed_content == "typed into the placeholder"
+
+
+def test_drawing_made_in_a_placeholder_through_the_app_is_not_claimed(server):
+    sdb = server["db"]
+    assert _mkcol(server, "uncategorized/doc__abcd1234").status_code in (200, 201)
+    placeholder = [n for n in sdb.list_notes() if n.id.startswith("abcd1234")][0]
+    # The app user draws in the stand-in note (REST ink save).
+    note = sdb.get_note(placeholder.id, load_pages=True)
+    note.pages[0].strokes = [InkStroke(id="user-stroke", points=[Point(1, 1), Point(2, 2)])]
+    sdb.save_note(note)
+
+    resp = _put_meta(server, "uncategorized/doc__abcd1234", CLIENT_ID)
+    # The engine follows note.json with the page ink even when it failed.
+    ink = requests.put(server["url"] + "uncategorized/doc__abcd1234/page_1.ink",
+                       json={"note_id": CLIENT_ID, "strokes": []},
+                       auth=AUTH, timeout=5)
+
+    assert resp.status_code == 409
+    assert ink.status_code == 409
+    kept = sdb.get_note(placeholder.id, load_pages=True)
+    assert [s.id for s in kept.pages[0].strokes] == ["user-stroke"]
+
+
+def test_drawing_put_before_note_json_is_kept_when_the_note_exists(server):
+    sdb = server["db"]
+    other_nb = Notebook(name="Elsewhere")
+    sdb.save_notebook(other_nb)
+    existing = Note(id=CLIENT_ID, title="Doc", notebook_id=other_nb.id)
+    existing.add_page()
+    sdb.save_note(existing)
+    assert _mkcol(server, "uncategorized/doc__abcd1234").status_code in (200, 201)
+    ink = {"note_id": CLIENT_ID,
+           "strokes": [{"id": "s1", "points": [{"x": 1, "y": 1}, {"x": 2, "y": 2}]}]}
+    assert requests.put(server["url"] + "uncategorized/doc__abcd1234/page_1.ink",
+                        json=ink, auth=AUTH, timeout=5).status_code < 300
+
+    resp = _put_meta(server, "uncategorized/doc__abcd1234", CLIENT_ID)
+
+    assert resp.status_code < 300
+    note = sdb.get_note(CLIENT_ID, load_pages=True)
+    assert [s.id for s in note.pages[0].strokes] == ["s1"]
+
+
+@pytest.fixture
+def plain_server(tmp_path):
+    from nexanote.storage import PlainMarkdownNoteStore
+
+    db = PlainMarkdownNoteStore(tmp_path / "plain_store")
+    ensure_storage_layout(db)
+    ensure_default_notebook(db)
+    app = build_app(db, username="user", password="pass", verbose=False)
+    port = _free_port()
+    httpd = cheroot_wsgi.Server(bind_addr=("127.0.0.1", port), wsgi_app=app, numthreads=4)
+    threading.Thread(target=httpd.start, daemon=True).start()
+    url = f"http://127.0.0.1:{port}/"
+    for _ in range(100):
+        try:
+            requests.options(url, timeout=1)
+            break
+        except requests.RequestException:
+            time.sleep(0.05)
+    yield {"url": url, "db": db}
+    httpd.stop()
+
+
+def test_claimed_note_keeps_its_plain_file_name(plain_server):
+    assert _mkcol(plain_server, "uncategorized/doc__abcd1234").status_code in (200, 201)
+
+    resp = _put_meta(plain_server, "uncategorized/doc__abcd1234", CLIENT_ID)
+
+    assert resp.status_code < 300
+    files = sorted(p.name for p in plain_server["db"].notes_dir.iterdir())
+    assert files == ["Doc.json", "Doc.md"]
+
+
+def test_ink_for_another_note_does_not_overwrite_the_note_at_that_path(server):
+    sdb = server["db"]
+    real = Note(id=REAL_ID, title="Sketch", notebook_id=_uncategorized(sdb).id)
+    real.add_page().strokes.append(InkStroke(id="mine", points=[Point(1, 1), Point(2, 2)]))
+    sdb.save_note(real)
+
+    resp = requests.put(server["url"] + "uncategorized/sketch__abcd1234/page_1.ink",
+                        json={"note_id": CLIENT_ID, "strokes": []}, auth=AUTH, timeout=5)
+
+    assert resp.status_code == 409
+    assert [s.id for s in sdb.get_note(REAL_ID, load_pages=True).pages[0].strokes] == ["mine"]

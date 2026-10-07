@@ -605,14 +605,38 @@ class _NoteMetaWriter(io.RawIOBase):
                         HTTP_CONFLICT,
                         context_info="note.json id does not match the note at this path",
                     )
-                placeholder_id = self.note.id
+                placeholder = self.note
+                placeholder_id = placeholder.id
+                # The placeholder holds nothing but what this client sent
+                # (checked above) and its content is carried over in memory,
+                # so its files go first: in the plain store the claimed note
+                # then gets the placeholder's file name, not "Doc (2).md".
+                try:
+                    self.db.delete_note_permanent(placeholder_id)
+                except Exception:
+                    logger.warning(
+                        "could not delete placeholder note %s — ignoring",
+                        placeholder_id,
+                    )
                 existing = self.db.get_note(payload_id, load_pages=True)
                 if existing is not None:
                     # The client's note already exists here (e.g. it moved to
                     # this notebook): update it, keeping its pages and
                     # drawings, instead of overwriting it with the
-                    # placeholder's empty ones.
-                    existing.notebook_id = self.note.notebook_id
+                    # placeholder's empty ones. A page this client already
+                    # sent ink for (into the placeholder) takes that ink, as
+                    # the same PUT would have done on the real note.
+                    existing.notebook_id = placeholder.notebook_id
+                    for page in placeholder.pages:
+                        if not page.strokes:
+                            continue
+                        target = existing.get_page(page.page_number)
+                        if target is None:
+                            page.note_id = payload_id
+                            existing.pages.append(page)
+                        else:
+                            target.strokes = page.strokes
+                    existing.pages.sort(key=lambda p: p.page_number)
                     self.note = existing
                 else:
                     self.note.id = payload_id
@@ -651,14 +675,6 @@ class _NoteMetaWriter(io.RawIOBase):
                 self.note.touch()
             self.db.save_note(self.note)
             if placeholder_id is not None:
-                # Only now that the note is saved under its real id.
-                try:
-                    self.db.delete_note_permanent(placeholder_id)
-                except Exception:
-                    logger.warning(
-                        "could not delete placeholder note %s — ignoring",
-                        placeholder_id,
-                    )
                 _placeholders(self.db).remove(placeholder_id)
             logger.info("Note mise à jour via WebDAV PUT : %s", self.note.title)
         except DAVError:
@@ -675,23 +691,31 @@ def _is_placeholder_for(db: FileNoteStore, note: Note, payload_id: str) -> bool:
     `payload_id`. Being empty and sharing the id prefix is not enough: a real
     note can be both.
 
-    The placeholder's text must also still be empty: the claim replaces it
-    with the payload's, so text someone typed into the stand-in (through
-    the app) would be lost. Strokes are allowed (a page_N.ink PUT may land
-    before note.json); the claim keeps them.
+    The placeholder must also hold nothing but what the client itself sent:
+    no text (the claim replaces it with the payload's) and no strokes other
+    than the ones received through WebDAV for it (a page_N.ink PUT can land
+    before note.json). Text or a drawing someone made in the stand-in
+    through the app would otherwise be overwritten by the client's push.
     """
-    if note.id[:8] != payload_id[:8] or not _placeholders(db).contains(note.id):
+    if note.id[:8] != payload_id[:8]:
         return False
-    return all(not p.typed_content for p in note.pages)
+    client_strokes = _placeholders(db).client_strokes(note.id)
+    if client_strokes is None:
+        return False
+    return all(
+        not p.typed_content and all(s.id in client_strokes for s in p.strokes)
+        for p in note.pages
+    )
 
 
 class _PlaceholderRegistry:
     """
-    EN: Ids of the stand-in notes created ahead of a client's note.json,
-        persisted in the data directory so a server restart between MKCOL
-        and PUT doesn't turn the placeholder into an unclaimable note.
-    FR: Ids des notes provisoires créées avant le note.json du client,
-        persistés pour survivre à un redémarrage.
+    EN: Stand-in notes created ahead of a client's note.json, with the ids of
+        the strokes the client has PUT into each one, persisted in the data
+        directory so a server restart between MKCOL and PUT doesn't turn the
+        placeholder into an unclaimable note.
+    FR: Notes provisoires créées avant le note.json du client (et traits reçus
+        par WebDAV pour chacune), persistées pour survivre à un redémarrage.
     """
 
     FILE_NAME = ".webdav_placeholders.json"
@@ -700,37 +724,55 @@ class _PlaceholderRegistry:
     def __init__(self, data_dir: Path) -> None:
         self.path = Path(data_dir) / self.FILE_NAME
 
-    def _read(self) -> set[str]:
+    def _read(self) -> dict[str, list[str]]:
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
         except FileNotFoundError:
-            return set()
+            return {}
         except (OSError, ValueError) as exc:
             # Unreadable registry: claim nothing. A placeholder then gets a
             # 409 instead of a real note possibly being replaced.
             logger.warning("unreadable placeholder registry %s: %s", self.path, exc)
-            return set()
-        return {i for i in data if isinstance(i, str)} if isinstance(data, list) else set()
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        return {
+            k: [i for i in v if isinstance(i, str)]
+            for k, v in data.items()
+            if isinstance(k, str) and isinstance(v, list)
+        }
 
-    def _write(self, ids: set[str]) -> None:
-        _atomic_write(self.path, json.dumps(sorted(ids)).encode("utf-8"))
+    def _write(self, entries: dict[str, list[str]]) -> None:
+        _atomic_write(self.path, json.dumps(entries, sort_keys=True).encode("utf-8"))
 
     def add(self, note_id: str) -> None:
         with self._lock:
-            ids = self._read()
-            ids.add(note_id)
-            self._write(ids)
+            entries = self._read()
+            entries.setdefault(note_id, [])
+            self._write(entries)
+
+    def record_strokes(self, note_id: str, stroke_ids: list[str]) -> None:
+        """Remembers strokes the client sent through WebDAV, if [note_id] is
+        a placeholder; a no-op for any other note."""
+        with self._lock:
+            entries = self._read()
+            if note_id not in entries:
+                return
+            entries[note_id] = sorted(set(entries[note_id]) | set(stroke_ids))
+            self._write(entries)
 
     def remove(self, note_id: str) -> None:
         with self._lock:
-            ids = self._read()
-            if note_id in ids:
-                ids.discard(note_id)
-                self._write(ids)
+            entries = self._read()
+            if entries.pop(note_id, None) is not None:
+                self._write(entries)
 
-    def contains(self, note_id: str) -> bool:
+    def client_strokes(self, note_id: str) -> Optional[set[str]]:
+        """Strokes the client sent into placeholder [note_id], or None if it
+        is not a recorded placeholder."""
         with self._lock:
-            return note_id in self._read()
+            entries = self._read()
+        return set(entries[note_id]) if note_id in entries else None
 
 
 def _placeholders(db: FileNoteStore) -> _PlaceholderRegistry:
@@ -877,6 +919,25 @@ class _InkWriter(io.RawIOBase):
                 context_info=f"invalid ink page body: {exc}",
             ) from exc
 
+        # EN: Like note.json, an ink page addressed to another note (the
+        #     NexaNote client sends its note_id) must not overwrite the note
+        #     this path resolved to through the slug/prefix fallbacks. The
+        #     one exception is the client's own claimable placeholder (ink
+        #     that lands before note.json).
+        # FR: Un .ink destiné à une autre note est refusé (409), sauf pour le
+        #     placeholder réclamable de ce client.
+        payload_note_id = payload.get("note_id")
+        if (
+            isinstance(payload_note_id, str)
+            and payload_note_id
+            and payload_note_id != self.note.id
+            and not _is_placeholder_for(self.db, self.note, payload_note_id)
+        ):
+            raise DAVError(
+                HTTP_CONFLICT,
+                context_info="page ink note_id does not match the note at this path",
+            )
+
         try:
             new_strokes: list[InkStroke] = []
             for s_data in payload.get("strokes") or []:
@@ -909,6 +970,12 @@ class _InkWriter(io.RawIOBase):
                 self.note.touch()
             self.db.save_page(self.page)
             self.db.save_note(self.note, save_pages=False)
+            # Strokes the client sends into its own placeholder don't stop
+            # the placeholder from being claimed; strokes drawn in it through
+            # the app do (see _is_placeholder_for).
+            _placeholders(self.db).record_strokes(
+                self.note.id, [s.id for s in new_strokes]
+            )
             logger.info(
                 "Page %d mise à jour : %d strokes",
                 self.page.page_number,
