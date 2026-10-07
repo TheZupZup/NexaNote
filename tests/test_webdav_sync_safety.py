@@ -237,3 +237,26 @@ def test_network_drop_after_ping_fails_fast(tmp_path, server, engine_for):
     # The root listing fails, so the sync stops there instead of retrying
     # the whole PROPFIND/MKCOL/PUT chain for every note.
     assert len(calls) <= 3
+
+
+def test_put_with_a_foreign_id_does_not_delete_the_note_at_that_path(server):
+    sdb = server["db"]
+    nb = [n for n in sdb.list_notebooks() if n.id.startswith("00000000")][0]
+    victim = Note(title="My Note", notebook_id=nb.id)
+    page = victim.add_page()
+    page.typed_content = "victim text"
+    page.strokes.append(InkStroke(points=[Point(1, 1), Point(2, 2)]))
+    sdb.save_note(victim)
+
+    # "uncategorized/my-note" resolves to the victim through the title-slug
+    # fallback; the body belongs to an unrelated note.
+    body = {"id": "ffffffff-0000-0000-0000-000000000001", "title": "Other",
+            "pages": [{"page_number": 1, "typed_content": "other"}]}
+    resp = requests.put(server["url"] + "uncategorized/my-note/note.json",
+                        json=body, auth=("user", "pass"), timeout=5)
+
+    assert resp.status_code == 409
+    kept = sdb.get_note(victim.id, load_pages=True)
+    assert kept is not None
+    assert kept.pages[0].typed_content == "victim text"
+    assert len(kept.pages[0].strokes) == 1

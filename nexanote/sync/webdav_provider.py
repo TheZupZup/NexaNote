@@ -589,6 +589,19 @@ class _NoteMetaWriter(io.RawIOBase):
                 and payload_id
                 and payload_id != self.note.id
             ):
+                # EN: The note behind this path can also be a real note found
+                #     by the title-slug or id-prefix fallbacks. Only an empty
+                #     MKCOL placeholder minted from this same id prefix may be
+                #     replaced; deleting anything else would destroy a note
+                #     (and its drawings) because another client wrote to a
+                #     colliding path.
+                # FR: Seul un placeholder vide créé par MKCOL avec le même
+                #     préfixe d'ID peut être remplacé.
+                if not _is_placeholder_for(self.note, payload_id):
+                    raise DAVError(
+                        HTTP_CONFLICT,
+                        context_info="note.json id does not match the note at this path",
+                    )
                 old_id = self.note.id
                 self.note.id = payload_id
                 for page in self.note.pages:
@@ -637,6 +650,13 @@ class _NoteMetaWriter(io.RawIOBase):
         except Exception as exc:
             logger.exception("note.json write failed")
             raise _safe_dav_error(exc, "saving note failed") from exc
+
+
+def _is_placeholder_for(note: Note, payload_id: str) -> bool:
+    """True for the empty note MKCOL creates ahead of a client's note.json."""
+    if note.id[:8] != payload_id[:8]:
+        return False
+    return all(not p.typed_content and not p.strokes for p in note.pages)
 
 
 def _apply_client_timestamp(obj, value) -> bool:
