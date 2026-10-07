@@ -146,6 +146,10 @@ class ApiClient {
   /// the connection and never answers leaves a save "Saving…" forever.
   static const Duration requestTimeout = Duration(seconds: 20);
 
+  /// Saves carry the whole page (a long drawing can be megabytes), so on a
+  /// slow mobile uplink they get more time than ordinary requests.
+  static const Duration uploadTimeout = Duration(minutes: 2);
+
   /// `/sync/trigger` runs a whole WebDAV sync before answering.
   static const Duration syncTimeout = Duration(minutes: 5);
 
@@ -339,7 +343,8 @@ class ApiClient {
               Uri.parse('$baseUrl/notes/$noteId/pages/$pageNum/text'),
               headers: _headers,
               body: jsonEncode({'typed_content': content}),
-            ));
+            ),
+        timeout: uploadTimeout);
     _expect(resp, what);
   }
 
@@ -352,7 +357,8 @@ class ApiClient {
               Uri.parse('$baseUrl/notes/$noteId/pages/$pageNum/ink'),
               headers: _headers,
               body: jsonEncode({'strokes': strokes}),
-            ));
+            ),
+        timeout: uploadTimeout);
     _expect(resp, what);
   }
 

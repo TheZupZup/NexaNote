@@ -58,11 +58,30 @@ void main() {
       httpClient: MockClient((_) => Completer<http.Response>().future),
     );
     Object? error;
-    client.savePageText('n', 1, 'x').catchError((Object e) => error = e);
+    client.getNotes().catchError((Object e) {
+      error = e;
+      return <Note>[];
+    });
 
     await tester.pump(ApiClient.requestTimeout - const Duration(seconds: 1));
     expect(error, isNull);
     await tester.pump(const Duration(seconds: 2));
+    expect(error, isA<ApiException>());
+  });
+
+  testWidgets('saves get the longer upload timeout', (tester) async {
+    final client = ApiClient(
+      baseUrl: 'http://backend.test',
+      httpClient: MockClient((_) => Completer<http.Response>().future),
+    );
+    Object? error;
+    client.savePageInk('n', 1, const []).catchError((Object e) => error = e);
+
+    // Still uploading well past the normal request timeout...
+    await tester.pump(ApiClient.requestTimeout * 2);
+    expect(error, isNull);
+    // ...but it does not hang forever either.
+    await tester.pump(ApiClient.uploadTimeout);
     expect(error, isA<ApiException>());
   });
 }
