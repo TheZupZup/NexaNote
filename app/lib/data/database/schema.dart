@@ -20,7 +20,8 @@ class Schema {
   /// `_synced_rev`): every local edit bumps its part's revision, and a part
   /// is waiting for the server while its revision is ahead of the last one
   /// the server confirmed. That makes SQLite the durable copy of an edit
-  /// until the backend has acknowledged it, even in connected mode.
+  /// until the backend has acknowledged it, even in connected mode. Also
+  /// adds `has_content` and `blind_edit` (see Note.hasContent).
   static const int version = 4;
 
   static const String _createNotebooks = '''
@@ -60,11 +61,16 @@ class Schema {
       text_synced_rev  INTEGER NOT NULL DEFAULT 0,
       ink_rev          INTEGER NOT NULL DEFAULT 0,
       ink_synced_rev   INTEGER NOT NULL DEFAULT 0,
+      has_content   INTEGER NOT NULL DEFAULT 1,
+      blind_edit    INTEGER NOT NULL DEFAULT 0,
       created_at    TEXT NOT NULL,
       updated_at    TEXT NOT NULL,
       FOREIGN KEY (notebook_id) REFERENCES notebooks(id)
     )
   ''';
+
+  /// Every column added by version 4.
+  static const v4Columns = [...editRevisionColumns, 'has_content', 'blind_edit'];
 
   static const editRevisionColumns = [
     'title_rev',
@@ -156,6 +162,25 @@ class Schema {
         await db.execute(
             'ALTER TABLE notes ADD COLUMN $column INTEGER NOT NULL DEFAULT 0');
       }
+      await db.execute(
+          'ALTER TABLE notes ADD COLUMN has_content INTEGER NOT NULL DEFAULT 1');
+      await db.execute(
+          'ALTER TABLE notes ADD COLUMN blind_edit INTEGER NOT NULL DEFAULT 0');
+      // Rows a pull created carry the server id as their own id and hold
+      // no text or drawing.
+      await db.execute(
+          'UPDATE notes SET has_content = 0 WHERE remote_id = id '
+          "AND sync_status != 'local_only'");
+      // Older builds left local edits of server notes as `modified` without
+      // saying which part changed: treat every part as waiting to be sent,
+      // so they are neither lost to a refresh nor marked synced unsent.
+      await db.execute(
+          'UPDATE notes SET title_rev = 1, text_rev = 1, ink_rev = 1 '
+          "WHERE sync_status = 'modified' AND remote_id IS NOT NULL");
+      // Those edits, when made on a row without content, were made blind.
+      await db.execute(
+          'UPDATE notes SET blind_edit = 1 '
+          "WHERE has_content = 0 AND sync_status = 'modified'");
     }
   }
 }

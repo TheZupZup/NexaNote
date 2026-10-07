@@ -375,6 +375,8 @@ class SyncService {
       syncStatus: 'synced',
       remoteId: n.id,
       remotePath: derivedPath ?? _derivedRemotePath(n.id),
+      // A pull lists notes without their pages.
+      hasContent: false,
       createdAt: created,
       updatedAt: updated,
     );

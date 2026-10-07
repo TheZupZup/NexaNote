@@ -66,6 +66,9 @@ class FakeBackendClient extends api.ApiClient {
 
   /// Drawing saves fail while text and title saves go through.
   bool failInk = false;
+
+  /// Text saves are refused with this HTTP status (say 413).
+  int? refuseText;
   final _held = <Completer<void>>[];
 
   int get heldCount => _held.length;
@@ -168,6 +171,10 @@ class FakeBackendClient extends api.ApiClient {
   Future<String?> savePageText(
       String noteId, int pageNum, String content) async {
     await _write(noteId);
+    final status = refuseText;
+    if (status != null) {
+      throw api.ApiException('Failed to save text', statusCode: status);
+    }
     server.text[noteId] = content;
     server.writes.add('text:$content');
     return server.touch(noteId);

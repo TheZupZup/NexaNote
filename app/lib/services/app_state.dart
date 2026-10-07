@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -321,8 +323,11 @@ class AppState extends ChangeNotifier {
       try {
         // Notes taken offline before (or while) a server was configured are
         // uploaded so nothing created in local mode is lost on the switch.
-        await _uploadPendingLocalNotes();
+        // Edits saved on this device first: one made on a note whose
+        // content was never downloaded becomes a note of its own, which
+        // the upload right after then sends.
         await _pushEditsSavedOnDevice();
+        await _uploadPendingLocalNotes();
         await loadNotebooks();
         // The upload re-keys notebooks to their server ids, and a notebook
         // may be gone on this server: don't keep filing new notes under an
@@ -373,6 +378,9 @@ class AppState extends ChangeNotifier {
     _isBackendAvailable = true;
     _isConnected = true;
     _backendErrorMessage = null;
+    // Back online: send what was saved on this device meanwhile, also for
+    // notes whose editor is closed and gave up retrying.
+    unawaited(_pushEditsSavedOnDevice());
     return true;
   }
 
@@ -664,6 +672,9 @@ class AppState extends ChangeNotifier {
       notifyListeners();
       return;
     }
+    // Found before the delete: a push failing on the deleted note may
+    // unlink the row from it meanwhile.
+    final localId = await _localIdOrNull(id);
     try {
       await client.deleteNote(id);
       _notes = [..._notes.where((n) => n.id != id)];
@@ -674,7 +685,7 @@ class AppState extends ChangeNotifier {
       await _handleBackendFailure(e);
       rethrow;
     }
-    await _dropLocalCopy(id);
+    await _dropLocalCopy(id, localId);
   }
 
   /// Saves the note's title: durably on this device first, then to the
@@ -730,7 +741,7 @@ class AppState extends ChangeNotifier {
   Future<void> recordText(String noteId, String content) async {
     if (_localMode) {
       await _ensureLocalReady();
-      await _localService.updateNoteContent(noteId, content);
+      await _localService.updateNoteContent(noteId, content, blind: true);
       return;
     }
     await _recordConnected(
@@ -767,7 +778,7 @@ class AppState extends ChangeNotifier {
     if (_localMode) {
       await _ensureLocalReady();
       if (superseded()) return;
-      await _localService.recordInk(noteId, toLocal(noteId));
+      await _localService.recordInk(noteId, toLocal(noteId), blind: true);
       _unstageInk(noteId, ticket);
       return;
     }
@@ -868,7 +879,14 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> _pushOnce(String localId) async {
-    final note = await _localService.getNoteById(localId);
+    var note = await _localService.getNoteById(localId);
+    if (note != null && note.blindEdit) {
+      // Text or ink typed over a note whose content this device never had
+      // would wipe the server's: they go to a note of their own instead.
+      if (await _localService.splitOffContentlessEdits(localId)) {
+        note = await _localService.getNoteById(localId);
+      }
+    }
     final remoteId = note?.remoteId;
     if (note == null ||
         remoteId == null ||
@@ -876,44 +894,68 @@ class AppState extends ChangeNotifier {
         !note.hasPendingEdits) {
       return;
     }
+    final pushed = note;
+    // Each part on its own: one the server refuses (say a 413 for a huge
+    // text) doesn't keep the others from going through.
+    Object? failure;
+    Future<void> part(Future<void> Function() send) async {
+      if (failure is api.ApiException &&
+          (failure as api.ApiException).statusCode == 404) {
+        return;
+      }
+      try {
+        await send();
+      } catch (e) {
+        failure ??= e;
+      }
+    }
+
     var titleSent = false;
-    try {
-      if (note.titlePending) {
-        await client.updateNote(remoteId, title: note.title);
+    if (pushed.titlePending) {
+      await part(() async {
+        await client.updateNote(remoteId, title: pushed.title);
         await _localService.markPartSynced(
-            localId, local.NotePart.title, note.titleRev);
+            localId, local.NotePart.title, pushed.titleRev);
         titleSent = true;
-      }
-      if (note.textPending) {
-        await client.savePageText(remoteId, 1, note.typedContent);
+      });
+    }
+    if (pushed.textPending) {
+      await part(() async {
+        await client.savePageText(remoteId, 1, pushed.typedContent);
         await _localService.markPartSynced(
-            localId, local.NotePart.text, note.textRev);
-      }
-      if (note.inkPending) {
+            localId, local.NotePart.text, pushed.textRev);
+      });
+    }
+    if (pushed.inkPending) {
+      await part(() async {
         final ink = await _localService.readInk(localId);
-        if (ink != null) {
-          await client.savePageInk(
-              remoteId, 1, ink.strokes.map(inkJsonFromStroke).toList());
-          await _localService.markPartSynced(
-              localId, local.NotePart.ink, ink.rev);
-          // The editor stages by the id it opened the note with.
-          for (final key in {remoteId, localId}) {
-            final stagedRev = _stagedInk[key]?.rev;
-            if (stagedRev != null && stagedRev <= ink.rev) {
-              _stagedInk.remove(key);
-            }
+        if (ink == null) return;
+        await client.savePageInk(
+            remoteId, 1, ink.strokes.map(inkJsonFromStroke).toList());
+        await _localService.markPartSynced(
+            localId, local.NotePart.ink, ink.rev);
+        // The editor stages by the id it opened the note with.
+        for (final key in {remoteId, localId}) {
+          final stagedRev = _stagedInk[key]?.rev;
+          if (stagedRev != null && stagedRev <= ink.rev) {
+            _stagedInk.remove(key);
           }
         }
-      }
-    } catch (e) {
-      if (e is api.ApiException && e.statusCode == 404) {
+      });
+    }
+    final error = failure;
+    if (error != null) {
+      if (error is api.ApiException && error.statusCode == 404) {
         // Deleted on the server meanwhile: keep the edits as a note of its
         // own, uploaded like one taken offline, rather than retrying into
         // a note that is gone.
         await _localService.detachFromRemote(localId);
+        _stagedInk.remove(remoteId);
+        _stagedInk.remove(localId);
       }
-      await _handleBackendFailure(e);
-      rethrow;
+      await _handleBackendFailure(error);
+      if (titleSent) await loadNotes(notebookId: _selectedNotebook?.id);
+      throw error;
     }
     if (_markBackendAvailable()) notifyListeners();
     if (titleSent) await loadNotes(notebookId: _selectedNotebook?.id);
@@ -998,6 +1040,7 @@ class AppState extends ChangeNotifier {
       isPinned: n?.isPinned ?? false,
       typedContent: page?.typedContent ?? '',
       syncStatus: 'synced',
+      hasContent: n?.pages != null,
       createdAt: parse(n?.createdAt),
       updatedAt: parse(n?.updatedAt),
     );
@@ -1069,7 +1112,8 @@ class AppState extends ChangeNotifier {
       final localId = await _localService.localIdForRemote(id);
       if (localId == null) return null;
       final row = await _localService.getNoteById(localId);
-      if (row == null || row.isDeleted) return null;
+      // A row without content would open as an empty page.
+      if (row == null || row.isDeleted || !row.hasContent) return null;
       final strokes = await _localService.getStrokesForNote(localId);
       return _toApiNoteWithContent(row, strokes: strokes, id: id);
     } catch (e) {
@@ -1078,12 +1122,23 @@ class AppState extends ChangeNotifier {
     }
   }
 
-  /// Forgets the local copy of a note deleted on the server.
-  Future<void> _dropLocalCopy(String id) async {
-    _knownNotes.remove(id);
+  Future<String?> _localIdOrNull(String id) async {
     try {
-      final localId = await _localService.localIdForRemote(id);
-      if (localId != null) await _localService.hardDeleteNote(localId);
+      await _ensureLocalReady();
+      return await _localService.localIdForRemote(id);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Forgets the local copy ([localId]) of note [id], deleted on the server.
+  Future<void> _dropLocalCopy(String id, String? localId) async {
+    _knownNotes.remove(id);
+    _stagedInk.remove(id);
+    if (localId == null) return;
+    _stagedInk.remove(localId);
+    try {
+      await _localService.hardDeleteNote(localId);
     } catch (e) {
       debugPrint('Could not drop the local copy of note $id: $e');
     }
@@ -1115,6 +1170,7 @@ class AppState extends ChangeNotifier {
     }
     _beginSync();
     try {
+      await _pushEditsSavedOnDevice();
       final result = await client.triggerSync();
       final summary = result['summary'] ?? 'Sync complete';
       _markBackendAvailable();

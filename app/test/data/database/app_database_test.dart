@@ -170,7 +170,7 @@ void main() {
       final v2 = await openDatabase(inMemoryDatabasePath,
           version: 1, onCreate: (db, _) => Schema.onCreate(db, 1));
       await v2.execute('ALTER TABLE notes DROP COLUMN remote_baseline');
-      for (final column in Schema.editRevisionColumns) {
+      for (final column in Schema.v4Columns) {
         await v2.execute('ALTER TABLE notes DROP COLUMN $column');
       }
       final now = DateTime.utc(2024, 1, 1).toIso8601String();
@@ -196,32 +196,54 @@ void main() {
         'they were', () async {
       final v3 = await openDatabase(inMemoryDatabasePath,
           version: 1, onCreate: (db, _) => Schema.onCreate(db, 1));
-      for (final column in Schema.editRevisionColumns) {
+      for (final column in Schema.v4Columns) {
         await v3.execute('ALTER TABLE notes DROP COLUMN $column');
       }
       final now = DateTime.utc(2024, 1, 1).toIso8601String();
-      await v3.insert('notes', {
-        'id': 'n',
-        'title': 'Kept',
-        'typed_content': 'body',
-        'remote_id': 'srv-1',
-        'remote_baseline': now,
-        'sync_status': 'local_only',
-        'created_at': now,
-        'updated_at': now,
-      });
+      Future<void> insert(String id, String? remoteId, String status) =>
+          v3.insert('notes', {
+            'id': id,
+            'title': 'Kept',
+            'typed_content': 'body',
+            'remote_id': remoteId,
+            'remote_baseline': now,
+            'sync_status': status,
+            'created_at': now,
+            'updated_at': now,
+          });
+      await insert('uploading', 'srv-1', 'local_only');
+      await insert('pulled', 'pulled', 'synced');
+      await insert('pulled-edited', 'pulled-edited', 'modified');
+      await insert('uploaded-edited', 'srv-2', 'modified');
 
       await Schema.onUpgrade(v3, 3, Schema.version);
 
-      final row = Note.fromMap(
-          (await v3.query('notes', where: 'id = ?', whereArgs: ['n'])).first);
-      expect(row.title, 'Kept');
-      expect(row.typedContent, 'body');
-      expect(row.syncStatus, 'local_only');
-      expect(row.remoteBaseline, now);
-      // Older rows carry no per-part revision: nothing looks pending, and
-      // what they still have to upload stays with pushLocal via local_only.
-      expect(row.hasPendingEdits, isFalse);
+      Future<Note> row(String id) async => Note.fromMap(
+          (await v3.query('notes', where: 'id = ?', whereArgs: [id])).first);
+      final uploading = await row('uploading');
+      expect(uploading.title, 'Kept');
+      expect(uploading.typedContent, 'body');
+      expect(uploading.syncStatus, 'local_only');
+      expect(uploading.remoteBaseline, now);
+      // What it still has to upload stays with pushLocal via local_only.
+      expect(uploading.hasPendingEdits, isFalse);
+      expect(uploading.hasContent, isTrue);
+
+      // A pulled row never had the note's text or drawing.
+      final pulled = await row('pulled');
+      expect(pulled.hasContent, isFalse);
+      expect(pulled.hasPendingEdits, isFalse);
+
+      // Local edits older builds kept as `modified` stay pending instead of
+      // being overwritten by the next refresh; on a pulled row they were
+      // made blind.
+      final pulledEdited = await row('pulled-edited');
+      expect(pulledEdited.hasPendingEdits, isTrue);
+      expect(pulledEdited.blindEdit, isTrue);
+      final uploadedEdited = await row('uploaded-edited');
+      expect(uploadedEdited.hasPendingEdits, isTrue);
+      expect(uploadedEdited.hasContent, isTrue);
+      expect(uploadedEdited.blindEdit, isFalse);
       await v3.close();
     });
   });

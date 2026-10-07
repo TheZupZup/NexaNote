@@ -64,13 +64,18 @@ class LocalNoteService {
   /// They return the number of rows changed (0: no such note).
   Future<int> updateNoteTitle(String id, String title) =>
       _repo.updateNoteFields(id, {'title': title}, NotePart.title);
-  Future<int> updateNoteContent(String id, String typedContent) => _repo
-      .updateNoteFields(id, {'typed_content': typedContent}, NotePart.text);
+  /// [blind]: made without the note's real content at hand (local mode),
+  /// see Note.blindEdit.
+  Future<int> updateNoteContent(String id, String typedContent,
+          {bool blind = false}) =>
+      _repo.updateNoteFields(
+          id, {'typed_content': typedContent}, NotePart.text, blind);
 
   /// Replaces the note's drawing and records it as a local edit, atomically.
   /// Returns the new ink revision, or null when there is no such note.
-  Future<int?> recordInk(String id, List<Stroke> strokes) =>
-      _repo.recordInk(id, strokes);
+  Future<int?> recordInk(String id, List<Stroke> strokes,
+          {bool blind = false}) =>
+      _repo.recordInk(id, strokes, blind: blind);
 
   /// The note's current drawing with the ink revision it belongs to.
   Future<({int rev, List<Stroke> strokes})?> readInk(String id) =>
@@ -89,6 +94,8 @@ class LocalNoteService {
   Future<List<Note>> getNotesWithPendingEdits() =>
       _repo.getNotesWithPendingEdits();
   Future<void> detachFromRemote(String id) => _repo.detachFromRemote(id);
+  Future<bool> splitOffContentlessEdits(String id) =>
+      _repo.splitOffContentlessEdits(id);
 
   // Pull bookkeeping used by SyncService.
   Future<void> applyPulledNote(String localId, Note pulled) =>

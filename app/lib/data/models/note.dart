@@ -41,6 +41,13 @@ enum NotePart {
 /// whose revision is ahead is a local edit not yet on the server; the local
 /// row is its only durable copy until then.
 ///
+/// [hasContent] is false for rows that only hold a note's metadata (what a
+/// pull brings): their text and drawing were never downloaded, so they
+/// are not the note's content. [blindEdit] marks text or ink edited into
+/// such a row in local mode, on what looked like an empty page: sending
+/// that into the server note would wipe its real content, so it becomes a
+/// note of its own instead.
+///
 /// Mirrors Note in nexanote/models/note.py.
 class Note {
   final String id;
@@ -62,6 +69,8 @@ class Note {
   final int textSyncedRev;
   final int inkRev;
   final int inkSyncedRev;
+  final bool hasContent;
+  final bool blindEdit;
   final DateTime createdAt;
   final DateTime updatedAt;
 
@@ -85,6 +94,8 @@ class Note {
     this.textSyncedRev = 0,
     this.inkRev = 0,
     this.inkSyncedRev = 0,
+    this.hasContent = true,
+    this.blindEdit = false,
     required this.createdAt,
     required this.updatedAt,
   });
@@ -112,6 +123,8 @@ class Note {
       textSyncedRev: (map['text_synced_rev'] as int?) ?? 0,
       inkRev: (map['ink_rev'] as int?) ?? 0,
       inkSyncedRev: (map['ink_synced_rev'] as int?) ?? 0,
+      hasContent: ((map['has_content'] as int?) ?? 1) == 1,
+      blindEdit: ((map['blind_edit'] as int?) ?? 0) == 1,
       createdAt: DateTime.parse(map['created_at'] as String),
       updatedAt: DateTime.parse(map['updated_at'] as String),
     );
@@ -138,6 +151,8 @@ class Note {
       'text_synced_rev': textSyncedRev,
       'ink_rev': inkRev,
       'ink_synced_rev': inkSyncedRev,
+      'has_content': hasContent ? 1 : 0,
+      'blind_edit': blindEdit ? 1 : 0,
       'created_at': createdAt.toIso8601String(),
       'updated_at': updatedAt.toIso8601String(),
     };
@@ -156,6 +171,7 @@ class Note {
     String? syncStatus,
     String? remoteId,
     String? remotePath,
+    bool? hasContent,
     DateTime? updatedAt,
   }) {
     return Note(
@@ -179,6 +195,8 @@ class Note {
       textSyncedRev: textSyncedRev,
       inkRev: inkRev,
       inkSyncedRev: inkSyncedRev,
+      hasContent: hasContent ?? this.hasContent,
+      blindEdit: blindEdit,
       createdAt: createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
     );

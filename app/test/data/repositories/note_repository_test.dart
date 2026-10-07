@@ -364,12 +364,61 @@ void main() {
       await repo.updateNoteFields(
           note.id, {'typed_content': 'only copy'}, NotePart.text);
       await repo.setNoteRemoteId(note.id, 'srv-8', null); // still local_only
+      await repo.replaceStrokesForNote(note.id, [stroke('s1', note.id)]);
 
       final id = await repo.cacheRemoteNote(
           serverCopy('srv-8', text: 'empty on the server'), const []);
 
-      expect(id, isNot(note.id), reason: 'pushLocal owns the local_only row');
+      // It is the local copy of that note, left for pushLocal to finish:
+      // no second row, and nothing of it is moved or replaced.
+      expect(id, note.id);
+      expect(await repo.getAllNotes(), hasLength(1));
       expect((await repo.getNoteById(note.id))!.typedContent, 'only copy');
+      expect(await repo.getStrokesForNote(note.id), hasLength(1));
+    });
+
+    test('a stroke id used by another note never moves it over', () async {
+      final a = await repo.createNote('A');
+      final b = await repo.createNote('B');
+      await repo.replaceStrokesForNote(a.id, [stroke('same', a.id)]);
+
+      await repo.replaceStrokesForNote(b.id, [stroke('same', b.id)]);
+      await repo.replaceStrokesForNote(b.id, [stroke('same', b.id)]);
+
+      expect(await repo.getStrokesForNote(a.id), hasLength(1));
+      expect(await repo.getStrokesForNote(b.id), hasLength(1));
+      expect((await repo.getStrokesForNote(b.id)).single.points, hasLength(1));
+    });
+
+    test('text typed in local mode over a note without content becomes a '
+        'note of its own', () async {
+      final at = DateTime.utc(2024, 1, 1);
+      await repo.upsertNote(Note(
+        id: 'srv-3',
+        remoteId: 'srv-3',
+        title: 'Pulled',
+        syncStatus: 'synced',
+        hasContent: false,
+        createdAt: at,
+        updatedAt: at,
+      ));
+      await repo.updateNoteFields(
+          'srv-3', {'typed_content': 'typed blind'}, NotePart.text, true);
+      await repo.recordInk('srv-3', [stroke('s1', 'srv-3')], blind: true);
+
+      await repo.cacheRemoteNote(
+          serverCopy('srv-3', text: 'the real text'), [stroke('r1', 'srv-3')]);
+
+      final original = (await repo.getNoteById('srv-3'))!;
+      expect(original.typedContent, 'the real text');
+      expect(original.hasPendingEdits, isFalse);
+      expect((await repo.getStrokesForNote('srv-3')).map((s) => s.id), ['r1']);
+      final copy =
+          (await repo.getAllNotes()).singleWhere((n) => n.id != 'srv-3');
+      expect(copy.title, 'Pulled (offline copy)');
+      expect(copy.typedContent, 'typed blind');
+      expect(copy.syncStatus, 'local_only');
+      expect(await repo.getStrokesForNote(copy.id), hasLength(1));
     });
 
     test('a pull applied from an older snapshot keeps a pending edit',

@@ -306,4 +306,71 @@ void main() {
     expect(rows.single.typedContent, 'offline edit');
     expect(rows.single.syncStatus, 'synced');
   });
+
+  test('text typed in local mode over a pulled note never wipes its content',
+      () async {
+    final id = server.create('Report', 'mixed').id;
+    server.text[id] = 'important paragraphs';
+    server.ink[id] = [
+      {'id': 'r1', 'points': const []},
+    ];
+    // A pull lists the note without its pages.
+    await SyncService(apiClient: client, local: store).pullRemote();
+    await state.enableLocalMode();
+
+    final blank = (await state.openNote(id))!;
+    expect(blank.pages!.first.typedContent, isEmpty);
+    await state.recordText(id, 'one new line');
+
+    await state.connect(url: 'http://fake.test');
+
+    expect(server.text[id], 'important paragraphs');
+    expect(server.ink[id], hasLength(1));
+    final copy = server.notes.values.singleWhere((n) => n.id != id);
+    expect(copy.title, 'Report (offline copy)');
+    expect(server.text[copy.id], 'one new line');
+  });
+
+  test('a note the device never downloaded does not open as an empty page '
+      'offline', () async {
+    final id = server.create('Report', 'typed').id;
+    server.text[id] = 'important paragraphs';
+    await SyncService(apiClient: client, local: store).pullRemote();
+
+    client.down = true;
+    await expectLater(state.openNote(id), throwsA(anything));
+  });
+
+  test('edits of a closed note go out as soon as the backend is back',
+      () async {
+    final id = await openedNote();
+    client.down = true;
+    await expectLater(state.savePageText(id, 1, 'while down'), throwsA(anything));
+    expect(state.isBackendAvailable, isFalse);
+
+    client.down = false;
+    await state.loadNotes(); // any request that gets through
+    await pumpEventQueue();
+
+    expect(server.text[id], 'while down');
+  });
+
+  test('a part the server refuses does not hold back the others', () async {
+    final id = server.create('Sketch', 'mixed').id;
+    await state.openNote(id);
+    client.down = true;
+    await state.recordText(id, 'too big');
+    await state.recordInk(id, [
+      {'id': 's1', 'points': const []},
+    ]);
+    client.down = false;
+    client.refuseText = 413;
+
+    await expectLater(state.pushPending(id), throwsA(anything));
+
+    expect(server.ink[id], hasLength(1));
+    final row = (await store.getNoteById(id))!;
+    expect(row.inkPending, isFalse);
+    expect(row.textPending, isTrue);
+  });
 }

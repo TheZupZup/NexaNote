@@ -171,22 +171,28 @@ class NoteRepository {
   /// an earlier read would put back stale copies of the other fields.
   ///
   /// Returns the number of rows changed: 0 when note [id] doesn't exist.
+  ///
+  /// [blind] says the edit was made without the note's real content at hand
+  /// (local mode): on a row without content it sets [Note.blindEdit].
   Future<int> updateNoteFields(
     String id, [
     Map<String, Object?> fields = const {},
     NotePart? edited,
+    bool blind = false,
   ]) =>
-      _updateNoteFields(_db, id, fields, edited);
+      _updateNoteFields(_db, id, fields, edited, blind);
 
   static Future<int> _updateNoteFields(
     DatabaseExecutor db,
     String id,
     Map<String, Object?> fields,
-    NotePart? edited,
-  ) async {
+    NotePart? edited, [
+    bool blind = false,
+  ]) async {
     final assignments = [
       for (final column in fields.keys) '$column = ?',
       if (edited != null) '${edited.revColumn} = ${edited.revColumn} + 1',
+      if (blind) 'blind_edit = CASE has_content WHEN 0 THEN 1 ELSE blind_edit END',
       'updated_at = ?',
       "sync_status = CASE sync_status WHEN 'synced' THEN 'modified' "
           'ELSE sync_status END',
@@ -205,9 +211,11 @@ class NoteRepository {
   /// bumps the ink revision in one transaction, so the stored drawing and
   /// its revision always match. Returns the new ink revision, or null when
   /// note [id] doesn't exist (nothing is written then).
-  Future<int?> recordInk(String id, List<Stroke> strokes) {
+  Future<int?> recordInk(String id, List<Stroke> strokes,
+      {bool blind = false}) {
     return _db.transaction((txn) async {
-      if (await _updateNoteFields(txn, id, const {}, NotePart.ink) == 0) {
+      if (await _updateNoteFields(txn, id, const {}, NotePart.ink, blind) ==
+          0) {
         return null;
       }
       await _replaceStrokes(txn, id, strokes);
@@ -252,9 +260,10 @@ class NoteRepository {
     });
   }
 
-  /// Id of the local row that holds remote note [remoteId] for connected
-  /// mode, or null. Rows still waiting for their first upload (`local_only`)
-  /// don't count: SyncService.pushLocal owns those and their content.
+  /// Id of the local row that holds remote note [remoteId], or null. A row
+  /// still waiting to finish its first upload (`local_only`) counts too,
+  /// after any other: it is the local copy of that note, and edits recorded
+  /// into it are uploaded by SyncService.pushLocal with its usual checks.
   ///
   /// Falls back to a row whose own id is [remoteId]: notes listed from the
   /// local store while the backend is down are opened by their local id.
@@ -265,7 +274,7 @@ class NoteRepository {
       DatabaseExecutor db, String remoteId) async {
     final rows = await db.rawQuery(
       'SELECT id FROM notes WHERE remote_id = ? '
-      "AND sync_status != 'local_only' ORDER BY id = remote_id DESC LIMIT 1",
+      "ORDER BY sync_status = 'local_only', id = remote_id DESC LIMIT 1",
       [remoteId],
     );
     if (rows.isNotEmpty) return rows.first['id'] as String;
@@ -281,9 +290,11 @@ class NoteRepository {
   ///
   /// Parts with a local edit still waiting for the server keep the local
   /// version. With [refresh] false an existing copy is left as it is (used
-  /// to make sure a row exists before recording an edit). Rows with older
-  /// local changes that aren't tracked per part (`modified` without a
-  /// pending revision, `conflict`, `local_only`) are never overwritten.
+  /// to make sure a row exists before recording an edit). Rows that aren't
+  /// a plain copy of the server note (`conflict`, `local_only`) are never
+  /// overwritten. A row without content (see [Note.hasContent]) gets the
+  /// server's; text or ink edited into it first are split off into a note
+  /// of their own, since they were made without seeing the real content.
   Future<String> cacheRemoteNote(
     Note remote,
     List<Stroke> strokes, {
@@ -299,10 +310,16 @@ class NoteRepository {
       if (!refresh) return localId;
       final rows = await txn.query('notes',
           where: 'id = ?', whereArgs: [localId], limit: 1);
-      final local = Note.fromMap(rows.first);
+      var local = Note.fromMap(rows.first);
       final tracked = local.syncStatus == 'synced' ||
           (local.syncStatus == 'modified' && local.hasPendingEdits);
       if (!tracked) return localId;
+      if (local.blindEdit) {
+        await _splitOffContentlessEdits(txn, local);
+        local = Note.fromMap((await txn.query('notes',
+                where: 'id = ?', whereArgs: [localId], limit: 1))
+            .first);
+      }
       await txn.update(
         'notes',
         {
@@ -312,6 +329,7 @@ class NoteRepository {
           'is_pinned': remote.isPinned ? 1 : 0,
           if (!local.titlePending) 'title': remote.title,
           if (!local.textPending) 'typed_content': remote.typedContent,
+          'has_content': 1,
           if (!local.hasPendingEdits) ...{
             'sync_status': 'synced',
             'updated_at': remote.updatedAt.toIso8601String(),
@@ -323,6 +341,51 @@ class NoteRepository {
       if (!local.inkPending) await _replaceStrokes(txn, localId, strokes);
       return localId;
     });
+  }
+
+  /// Text or ink edited blind into row [id] (see [Note.blindEdit]) can't be
+  /// sent into the server note: they were made on an empty page and would
+  /// wipe what is really there. They are split
+  /// off into a new note of their own, uploaded like one taken offline.
+  /// Returns whether anything was split off.
+  Future<bool> splitOffContentlessEdits(String id) {
+    return _db.transaction((txn) async {
+      final rows =
+          await txn.query('notes', where: 'id = ?', whereArgs: [id], limit: 1);
+      if (rows.isEmpty) return false;
+      return _splitOffContentlessEdits(txn, Note.fromMap(rows.first));
+    });
+  }
+
+  Future<bool> _splitOffContentlessEdits(Transaction txn, Note row) async {
+    if (!row.blindEdit) return false;
+    if (!(row.textPending || row.inkPending)) {
+      await txn.update('notes', {'blind_edit': 0},
+          where: 'id = ?', whereArgs: [row.id]);
+      return false;
+    }
+    final now = DateTime.now().toUtc();
+    final copy = Note(
+      id: _uuid.v4(),
+      notebookId: row.notebookId,
+      title: '${row.title} (offline copy)',
+      noteType: row.noteType,
+      tags: row.tags,
+      typedContent: row.textPending ? row.typedContent : '',
+      createdAt: now,
+      updatedAt: now,
+    );
+    await txn.insert('notes', copy.toMap());
+    if (row.inkPending) {
+      await txn.update('strokes', {'note_id': copy.id},
+          where: 'note_id = ?', whereArgs: [row.id]);
+    }
+    await txn.rawUpdate(
+      "UPDATE notes SET typed_content = '', text_synced_rev = text_rev, "
+      'ink_synced_rev = ink_rev, blind_edit = 0 WHERE id = ?',
+      [row.id],
+    );
+    return true;
   }
 
   /// Applies a note's metadata from a pull to local row [localId]. Decided
@@ -517,6 +580,9 @@ class NoteRepository {
     await _db.transaction((txn) => _replaceStrokes(txn, noteId, strokes));
   }
 
+  /// Stroke ids are a global primary key. A stroke whose id another note
+  /// already uses (the same drawing in two notes) is stored under an id of
+  /// its own for this note, never moved away from the other one.
   static Future<void> _replaceStrokes(
     DatabaseExecutor txn,
     String noteId,
@@ -537,17 +603,26 @@ class NoteRepository {
     }
     await txn.delete('strokes', where: 'note_id = ?', whereArgs: [noteId]);
 
+    final taken = <String>{};
+    final ids = strokes.map((s) => s.id).toList();
+    for (var i = 0; i < ids.length; i += 500) {
+      final chunk = ids.sublist(i, i + 500 > ids.length ? ids.length : i + 500);
+      final rows = await txn.query('strokes',
+          columns: ['id'],
+          where: 'id IN (${List.filled(chunk.length, '?').join(', ')})',
+          whereArgs: chunk);
+      taken.addAll(rows.map((r) => r['id'] as String));
+    }
     for (final stroke in strokes) {
+      final id = taken.contains(stroke.id) ? '${stroke.id}@$noteId' : stroke.id;
       await txn.insert(
         'strokes',
-        {...stroke.toMap(), 'note_id': noteId},
+        {...stroke.toMap(), 'id': id, 'note_id': noteId},
         conflictAlgorithm: ConflictAlgorithm.replace,
       );
+      await txn.delete('stroke_points', where: 'stroke_id = ?', whereArgs: [id]);
       for (var i = 0; i < stroke.points.length; i++) {
-        await txn.insert(
-          'stroke_points',
-          stroke.points[i].toMap(stroke.id, i),
-        );
+        await txn.insert('stroke_points', stroke.points[i].toMap(id, i));
       }
     }
   }
