@@ -146,7 +146,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
     } catch (_) {}
   }
 
-  Future<void> _saveSettings() async {
+  /// Returns false when the backend refused or never got the sync settings.
+  Future<bool> _saveSettings() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('nas_url', _nasUrlCtrl.text.trim());
     await prefs.setString('nas_user', _nasUserCtrl.text.trim());
@@ -158,21 +159,32 @@ class _SettingsScreenState extends State<SettingsScreen> {
     // values locally so they're ready once the user connects one.
     final state = context.read<AppState>();
     if (state.isBackendConfigured) {
-      await state.client.configureSync(
-        serverUrl: _nasUrlCtrl.text.trim(),
-        username: _nasUserCtrl.text.trim(),
-        password: _nasPassCtrl.text,
-      );
+      try {
+        await state.client.configureSync(
+          serverUrl: _nasUrlCtrl.text.trim(),
+          username: _nasUserCtrl.text.trim(),
+          password: _nasPassCtrl.text,
+        );
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+              content: Text('Could not send sync settings to the backend: $e'),
+              backgroundColor: Colors.red));
+        }
+        return false;
+      }
     }
 
+    if (!mounted) return true;
     setState(() => _isSaved = true);
     Future.delayed(const Duration(seconds: 2), () {
       if (mounted) setState(() => _isSaved = false);
     });
+    return true;
   }
 
   Future<void> _triggerSync() async {
-    await _saveSettings();
+    if (!await _saveSettings() || !mounted) return;
     setState(() {
       _isSyncing = true;
       _syncMessage = null;
