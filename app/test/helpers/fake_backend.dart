@@ -63,6 +63,9 @@ class FakeBackendClient extends api.ApiClient {
   final FakeServer server;
   bool down = false;
   bool hold = false;
+
+  /// Drawing saves fail while text and title saves go through.
+  bool failInk = false;
   final _held = <Completer<void>>[];
 
   int get heldCount => _held.length;
@@ -174,6 +177,7 @@ class FakeBackendClient extends api.ApiClient {
   Future<String?> savePageInk(
       String noteId, int pageNum, List<Map<String, dynamic>> strokes) async {
     await _write(noteId);
+    if (failInk) throw _unreachable;
     server.ink[noteId] = strokes;
     server.writes.add('ink:${strokes.length}');
     return server.touch(noteId);

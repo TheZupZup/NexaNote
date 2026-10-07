@@ -257,4 +257,53 @@ void main() {
     expect(server.text[other], 'b');
     expect(state.syncError, contains('Could not upload edits'));
   });
+
+  test('a push that dies between the text and the drawing resends only the '
+      'drawing', () async {
+    final id = server.create('Sketch', 'mixed').id;
+    await state.openNote(id);
+    client.down = true;
+    await state.recordText(id, 'caption');
+    await state.recordInk(id, [
+      {
+        'id': 's1',
+        'points': [
+          {'x': 1, 'y': 2},
+        ],
+      },
+    ]);
+    client.down = false;
+    client.failInk = true;
+
+    await expectLater(state.pushPending(id), throwsA(anything));
+    var row = (await store.getNoteById(id))!;
+    expect(row.textPending, isFalse);
+    expect(row.inkPending, isTrue);
+
+    client.failInk = false;
+    await state.pushPending(id);
+    expect(server.writes, ['text:caption', 'ink:1']);
+    row = (await store.getNoteById(id))!;
+    expect(row.hasPendingEdits, isFalse);
+    expect(row.syncStatus, 'synced');
+  });
+
+  test('syncing five times in a row sends an edit once and adds nothing',
+      () async {
+    final id = await openedNote();
+    client.down = true;
+    await state.recordText(id, 'offline edit');
+    client.down = false;
+
+    for (var i = 0; i < 5; i++) {
+      await state.syncNow();
+    }
+
+    expect(server.writes, ['text:offline edit']);
+    expect(server.notes, hasLength(1));
+    final rows = (await store.exportAllData()).notes;
+    expect(rows, hasLength(1));
+    expect(rows.single.typedContent, 'offline edit');
+    expect(rows.single.syncStatus, 'synced');
+  });
 }
