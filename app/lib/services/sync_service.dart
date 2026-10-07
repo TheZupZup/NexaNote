@@ -104,10 +104,29 @@ class SyncService {
     for (final note in snapshot.notes) {
       if (_isAlreadySynced(note.syncStatus)) continue;
       final pendingUpload = note.syncStatus == 'local_only';
-      var remoteId = note.remoteId;
+      final remoteId = note.remoteId;
       final hasRemote = remoteId != null && remoteId.isNotEmpty;
       if (hasRemote && !pendingUpload) continue;
-      if (!hasRemote) {
+      var target = hasRemote ? remoteId : null;
+      if (target != null) {
+        // Resuming an upload interrupted after the create. The user may have
+        // written in that note online since then; never overwrite that.
+        final server = await _remoteNoteOrNull(target);
+        if (server == null) {
+          target = null; // deleted on the server meanwhile: create it again
+        } else if (_hasContent(server)) {
+          final copy = await _api.createNote(
+            title: '${cleanRemoteTitle(note.title)} (offline copy)',
+            noteType: note.noteType,
+            notebookId: server.notebookId,
+          );
+          await _uploadContent(note, copy.id);
+          await _local.markNoteSyncedIfUnchanged(note.id, note.updatedAt);
+          notes++;
+          continue;
+        }
+      }
+      if (target == null) {
         // Deleted before it ever reached the server: nothing to propagate.
         if (note.isDeleted) continue;
         final notebookId = note.notebookId;
@@ -118,22 +137,38 @@ class SyncService {
           // reject the note; file it unsorted rather than abort the push.
           notebookId: notebookId == null ? null : serverNotebookIds[notebookId],
         );
-        remoteId = created.id;
-        await _local.setNoteRemoteId(note.id, remoteId);
+        target = created.id;
+        await _local.setNoteRemoteId(note.id, target);
         notes++;
       }
-      if (note.typedContent.isNotEmpty) {
-        await _api.savePageText(remoteId, 1, note.typedContent);
-      }
-      final strokes = await _local.getStrokesForNote(note.id);
-      if (strokes.isNotEmpty) {
-        await _api.savePageInk(
-            remoteId, 1, strokes.map(inkJsonFromStroke).toList());
-      }
+      await _uploadContent(note, target);
       await _local.markNoteSyncedIfUnchanged(note.id, note.updatedAt);
     }
     return _PushCounts(notebooks: notebooks, notes: notes);
   }
+
+  Future<void> _uploadContent(Note note, String remoteId) async {
+    if (note.typedContent.isNotEmpty) {
+      await _api.savePageText(remoteId, 1, note.typedContent);
+    }
+    final strokes = await _local.getStrokesForNote(note.id);
+    if (strokes.isNotEmpty) {
+      await _api.savePageInk(
+          remoteId, 1, strokes.map(inkJsonFromStroke).toList());
+    }
+  }
+
+  Future<api.Note?> _remoteNoteOrNull(String id) async {
+    try {
+      return await _api.getNote(id);
+    } on api.ApiException catch (e) {
+      if (e.statusCode == 404) return null;
+      rethrow;
+    }
+  }
+
+  static bool _hasContent(api.Note note) => (note.pages ?? const []).any(
+      (p) => p.typedContent.isNotEmpty || p.strokes.isNotEmpty);
 
   static bool _isAlreadySynced(String status) => status == 'synced';
 

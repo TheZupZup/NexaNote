@@ -20,10 +20,28 @@ class FakeApiClient extends api.ApiClient {
   List<Map<String, dynamic>> createdNotes = [];
   Map<String, String> savedText = {};
   Map<String, List<Map<String, dynamic>>> savedInk = {};
+  bool failText = false;
 
   @override
   Future<void> savePageText(String noteId, int pageNum, String content) async {
+    if (failText) throw const api.ApiException('Failed to save text');
     savedText[noteId] = content;
+  }
+
+  @override
+  Future<api.Note> getNote(String id) async {
+    final note = remoteNotes.where((n) => n.id == id).firstOrNull;
+    if (note == null) {
+      throw const api.ApiException('Failed to load note', statusCode: 404);
+    }
+    return note.copyWith(pages: [
+      api.NotePage(
+        pageNumber: 1,
+        template: 'blank',
+        typedContent: savedText[id] ?? '',
+        strokes: savedInk[id] ?? const [],
+      ),
+    ]);
   }
 
   @override
@@ -241,6 +259,43 @@ void main() {
     expect(snapshot.notes.where((n) => !n.isDeleted), hasLength(1));
     expect(snapshot.notes.single.syncStatus, 'synced');
     expect(snapshot.notebooks, hasLength(1));
+  });
+
+  group('resuming an upload interrupted after the create', () {
+    Future<String> interruptedUpload() async {
+      final note = await local.createNote('Offline');
+      await local.updateNoteContent(note.id, 'written offline');
+      fakeApi.failText = true;
+      await expectLater(sync.pushLocal(), throwsA(isA<api.ApiException>()));
+      fakeApi.failText = false;
+      return fakeApi.remoteNotes.single.id;
+    }
+
+    test('uploads the content into the note it already created', () async {
+      final remoteId = await interruptedUpload();
+
+      await sync.pushLocal();
+
+      expect(fakeApi.createdNotes, hasLength(1));
+      expect(fakeApi.savedText[remoteId], 'written offline');
+    });
+
+    test('never overwrites what was written in that note online since',
+        () async {
+      final remoteId = await interruptedUpload();
+      fakeApi.savedText[remoteId] = 'typed on the server afterwards';
+
+      await sync.sync();
+      await sync.sync();
+
+      expect(fakeApi.savedText[remoteId], 'typed on the server afterwards');
+      // The offline text is not dropped: it lands in a separate copy, once.
+      final copies = fakeApi.createdNotes
+          .where((n) => n['title'] == 'Offline (offline copy)')
+          .toList();
+      expect(copies, hasLength(1));
+      expect(fakeApi.savedText['remote-note-2'], 'written offline');
+    });
   });
 
   test('pushLocal skips records already marked synced', () async {
