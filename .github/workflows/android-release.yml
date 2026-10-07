@@ -1,8 +1,9 @@
 name: Build NexaNote Android APK
 
 # Releasing (the pubspec is the single source of truth for the version):
-#   1. Bump `version:` in app/pubspec.yaml (e.g. 1.0.1+3 — versionName+versionCode).
-#   2. Commit, then tag the matching versionName: `git tag v1.0.1 && git push --tags`.
+#   1. Run the Prepare release workflow to create/update release/vX.Y.Z.
+#   2. Merge the release PR into main.
+#   3. Create the GitHub Release / tag vX.Y.Z from main.
 # A `vX.Y.Z` tag builds a release-mode APK, attaches it to the GitHub Release as
 # a stable-named asset (NexaNote-Android.apk) so Obtainium can track updates, and
 # titles the release "NexaNote vX.Y.Z". The job fails if the tag does not match
