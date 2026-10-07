@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:ui' show AppExitResponse;
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../services/api_client.dart';
@@ -32,8 +34,30 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
   late String _savedTitle;
   late String _savedContent;
 
+  /// The newest complete drawing not yet confirmed saved. Stays set after a
+  /// failed save so the same snapshot can be retried; only a newer drawing
+  /// replaces it.
   List<Map<String, dynamic>>? _pendingInk;
-  bool _inkSaveRunning = false;
+
+  /// The single ink writer while it runs; see [_flushInk].
+  Future<void>? _inkWriter;
+  Timer? _inkRetryTimer;
+  int _inkRetries = 0;
+  bool _disposed = false;
+
+  /// Backoff between automatic retries of a failed ink save. While the editor
+  /// is open the last delay repeats; once it is closed, retries stop after
+  /// going through the list once.
+  static const _inkRetryDelays = [
+    Duration(seconds: 2),
+    Duration(seconds: 5),
+    Duration(seconds: 15),
+    Duration(seconds: 30),
+    Duration(seconds: 60),
+  ];
+
+  /// How long closing the desktop window waits for pending saves.
+  static const _exitSaveTimeout = Duration(seconds: 5);
   late Note _note;
   bool _showInk = false;
 
@@ -165,41 +189,66 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     setState(() => _showInk = true);
   }
 
-  Future<void> _saveInk(List<Map<String, dynamic>> strokes) async {
+  Future<void> _saveInk(List<Map<String, dynamic>> strokes) {
     // Keep the on-screen drawing in memory first so a failed persist (or a
     // mode toggle) never drops what the user just drew.
     _inkStrokes = strokes;
     _pendingInk = strokes;
-    // Each save sends the whole drawing, so only the newest one matters. One
-    // writer drains it: concurrent saves could otherwise land out of order
-    // and replace the drawing with an older copy missing the last strokes.
-    if (_inkSaveRunning) return;
+    _inkRetries = 0;
+    return _flushInk();
+  }
+
+  /// Starts the ink writer unless it is already running, and completes when
+  /// it goes idle. Each save sends the whole drawing, so only the newest
+  /// snapshot matters; a single writer means saves can't land out of order
+  /// and put an older drawing back.
+  Future<void> _flushInk() {
+    _inkRetryTimer?.cancel();
+    _inkRetryTimer = null;
+    return _inkWriter ??= _drainInk().whenComplete(() => _inkWriter = null);
+  }
+
+  Future<void> _drainInk() async {
     final state = _appState;
     if (state == null) return;
-    _inkSaveRunning = true;
-    try {
-      while (_pendingInk != null) {
-        final next = _pendingInk!;
-        _pendingInk = null;
-        try {
-          await state.savePageInk(_note.id, 1, next);
-          _inkSaveFailed = false;
-        } catch (e) {
-          debugPrint('Ink save error: $e');
-          // Surface a friendly, throttled error rather than silently dropping
-          // the stroke. The drawing stays on screen regardless.
-          if (mounted && !_inkSaveFailed) {
-            _inkSaveFailed = true;
-            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-                content: Text(
-                    'Could not save drawing — it stays on screen, retrying as you draw.'),
-                backgroundColor: Colors.red));
-          }
+    while (_pendingInk != null) {
+      final next = _pendingInk!;
+      _pendingInk = null;
+      try {
+        await state.savePageInk(_note.id, 1, next);
+        _inkSaveFailed = false;
+        _inkRetries = 0;
+      } catch (e) {
+        debugPrint('Ink save error: $e');
+        // Keep this snapshot pending unless a newer drawing arrived while it
+        // was saving: the newer one supersedes it and is tried right away,
+        // and the older one must never be saved after it.
+        _pendingInk ??= next;
+        if (!identical(_pendingInk, next)) continue;
+        // Surface a friendly, throttled error rather than silently dropping
+        // the stroke. The drawing stays on screen regardless.
+        if (mounted && !_inkSaveFailed) {
+          _inkSaveFailed = true;
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+              content: Text(
+                  'Could not save drawing — it stays on screen and will be retried.'),
+              backgroundColor: Colors.red));
         }
+        _scheduleInkRetry();
+        return;
       }
-    } finally {
-      _inkSaveRunning = false;
     }
+  }
+
+  void _scheduleInkRetry() {
+    if (_disposed && _inkRetries >= _inkRetryDelays.length) {
+      debugPrint('Giving up retrying the ink save for note ${_note.id}');
+      return;
+    }
+    final delay =
+        _inkRetryDelays[_inkRetries.clamp(0, _inkRetryDelays.length - 1)];
+    _inkRetries++;
+    _inkRetryTimer = Timer(delay, _flushInk);
   }
 
   /// The app has no trash view to restore from, so deleting from the editor
@@ -245,12 +294,38 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     if (state == AppLifecycleState.resumed) return;
     _saveTimer?.cancel();
     if (_hasChanges) _save();
+    // A drawing whose save failed would otherwise wait for its retry timer,
+    // which never fires if the backgrounded process is killed.
+    if (_pendingInk != null) _flushInk();
+  }
+
+  /// Desktop window close: give pending text and ink saves a bounded chance
+  /// to finish before the process exits, without blocking the close on a
+  /// backend that never answers.
+  @override
+  Future<AppExitResponse> didRequestAppExit() async {
+    _saveTimer?.cancel();
+    final saves = <Future<void>>[
+      if (_hasChanges) _persist() else _textSaves,
+      if (_pendingInk != null || _inkWriter != null) _flushInk(),
+    ];
+    try {
+      await Future.wait(saves).timeout(_exitSaveTimeout);
+    } on TimeoutException {
+      debugPrint('Exiting with saves still pending for note ${_note.id}');
+    }
+    return AppExitResponse.exit;
   }
 
   @override
   void dispose() {
+    _disposed = true;
     WidgetsBinding.instance.removeObserver(this);
     _saveTimer?.cancel();
+    // A failed drawing save keeps retrying (bounded) with the captured
+    // AppState after the editor is gone; start right away rather than
+    // waiting for the backoff.
+    if (_pendingInk != null) _flushInk();
     // Flush pending text edits. The save is queued behind any in-flight one
     // and only uses the captured AppState, so it is safe after unmount.
     if (_hasChanges) _persist();
