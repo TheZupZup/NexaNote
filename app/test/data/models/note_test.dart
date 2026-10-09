@@ -5,7 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:nexanote/data/models/note.dart';
 
 void main() {
-  final _ts = DateTime.utc(2024, 6, 1, 9, 0);
+  final ts = DateTime.utc(2024, 6, 1, 9, 0);
 
   group('Note', () {
     test('toMap / fromMap round-trip preserves all fields', () {
@@ -22,8 +22,8 @@ void main() {
         syncStatus: 'modified',
         remoteId: 'md.SGVsbG8',
         remotePath: 'notes/Hello.md',
-        createdAt: _ts,
-        updatedAt: _ts,
+        createdAt: ts,
+        updatedAt: ts,
       );
 
       final restored = Note.fromMap(note.toMap());
@@ -48,8 +48,8 @@ void main() {
       final note = Note(
         id: 'note-default',
         title: 'Default',
-        createdAt: _ts,
-        updatedAt: _ts,
+        createdAt: ts,
+        updatedAt: ts,
       );
       expect(note.remoteId, isNull);
       expect(note.remotePath, isNull);
@@ -62,8 +62,8 @@ void main() {
       final note = Note(
         id: 'n',
         title: 'T',
-        createdAt: _ts,
-        updatedAt: _ts,
+        createdAt: ts,
+        updatedAt: ts,
       );
       final updated = note.copyWith(
         remoteId: 'md.AAAA',
@@ -78,8 +78,8 @@ void main() {
         id: 'note-1',
         title: 'Tagged',
         tags: ['a', 'b', 'c'],
-        createdAt: _ts,
-        updatedAt: _ts,
+        createdAt: ts,
+        updatedAt: ts,
       );
       final map = note.toMap();
       expect(map['tags'], isA<String>());
@@ -92,8 +92,8 @@ void main() {
         id: 'note-2',
         title: 'No Tags',
         tags: [],
-        createdAt: _ts,
-        updatedAt: _ts,
+        createdAt: ts,
+        updatedAt: ts,
       );
       final restored = Note.fromMap(note.toMap());
       expect(restored.tags, isEmpty);
@@ -106,8 +106,8 @@ void main() {
         isPinned: true,
         isArchived: false,
         isDeleted: true,
-        createdAt: _ts,
-        updatedAt: _ts,
+        createdAt: ts,
+        updatedAt: ts,
       );
       final map = note.toMap();
       expect(map['is_pinned'], 1);
@@ -120,28 +120,28 @@ void main() {
         id: 'note-4',
         notebookId: 'nb-1',
         title: 'Original',
-        createdAt: _ts,
-        updatedAt: _ts,
+        createdAt: ts,
+        updatedAt: ts,
       );
       final updated = note.copyWith(
         title: 'Updated',
         syncStatus: 'modified',
-        updatedAt: _ts.add(const Duration(minutes: 5)),
+        updatedAt: ts.add(const Duration(minutes: 5)),
       );
 
       expect(updated.id, 'note-4');
       expect(updated.notebookId, 'nb-1');
       expect(updated.title, 'Updated');
       expect(updated.syncStatus, 'modified');
-      expect(updated.createdAt, _ts);
+      expect(updated.createdAt, ts);
     });
 
     test('null notebookId survives round-trip', () {
       final note = Note(
         id: 'note-5',
         title: 'Orphan',
-        createdAt: _ts,
-        updatedAt: _ts,
+        createdAt: ts,
+        updatedAt: ts,
       );
       final restored = Note.fromMap(note.toMap());
       expect(restored.notebookId, isNull);

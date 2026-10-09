@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:sqflite/sqflite.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 import 'package:nexanote/data/database/schema.dart';
@@ -57,8 +56,20 @@ void main() {
     await tester.pumpAndSettle();
   }
 
-  /// Re-reads [getNoteById] until [predicate] holds or we run out of pumps —
-  /// deterministic without depending on exact save-future timing.
+  /// Real sqflite (FFI) I/O never completes inside the widget test's fake
+  /// clock, so every database read goes through [WidgetTester.runAsync], and
+  /// we let real time pass between pumps so the editor's own saves can finish.
+  Future<T> io<T>(WidgetTester tester, Future<T> Function() body) async =>
+      (await tester.runAsync(body)) as T;
+
+  Future<void> settle(WidgetTester tester) async {
+    for (var i = 0; i < 10; i++) {
+      await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 5)));
+      await tester.pump(const Duration(milliseconds: 20));
+    }
+  }
+
   Future<String?> pollContent(
     WidgetTester tester,
     String id,
@@ -66,27 +77,34 @@ void main() {
   ) async {
     String? content;
     for (var i = 0; i < 25; i++) {
-      content = (await service.getNoteById(id))?.typedContent;
+      content = await io(tester, () async {
+        return (await service.getNoteById(id))?.typedContent;
+      });
       if (predicate(content)) break;
-      await tester.pump(const Duration(milliseconds: 20));
+      await settle(tester);
     }
     return content;
   }
 
   Future<List<Stroke>> pollStrokes(WidgetTester tester, String id) async {
-    var strokes = await service.getStrokesForNote(id);
+    var strokes = await io(tester, () => service.getStrokesForNote(id));
     for (var i = 0; i < 25 && strokes.isEmpty; i++) {
-      await tester.pump(const Duration(milliseconds: 20));
-      strokes = await service.getStrokesForNote(id);
+      await settle(tester);
+      strokes = await io(tester, () => service.getStrokesForNote(id));
     }
     return strokes;
   }
 
+  Future<api.Note> newNote(WidgetTester tester, String title, String type) =>
+      io(tester, () async {
+        final created = await state.createNote(title: title, noteType: type);
+        return state.getNote(created.id);
+      });
+
   testWidgets('typing then leaving the editor flushes the text to local storage',
       (tester) async {
-    final created = await state.createNote(title: 'Notes', noteType: 'typed');
-    final note = await state.getNote(created.id);
-    await pumpEditor(tester, note);
+    final created = await newNote(tester, 'Notes', 'typed');
+    await pumpEditor(tester, created);
 
     await tester.enterText(
         find.byWidgetPredicate((w) =>
@@ -97,7 +115,7 @@ void main() {
     // Leave the editor *before* the 2s debounce fires by tearing the widget
     // down. The dispose-time flush must still persist the edit.
     await tester.pumpWidget(const SizedBox());
-    await tester.pumpAndSettle();
+    await settle(tester);
 
     final content =
         await pollContent(tester, created.id, (c) => c == 'remember the milk');
@@ -106,9 +124,8 @@ void main() {
 
   testWidgets('debounced autosave persists typed text without leaving',
       (tester) async {
-    final created = await state.createNote(title: 'Notes', noteType: 'typed');
-    final note = await state.getNote(created.id);
-    await pumpEditor(tester, note);
+    final created = await newNote(tester, 'Notes', 'typed');
+    await pumpEditor(tester, created);
 
     await tester.enterText(
         find.byWidgetPredicate((w) =>
@@ -116,7 +133,7 @@ void main() {
         'autosaved body');
     // Let the 2s debounce timer fire.
     await tester.pump(const Duration(seconds: 2));
-    await tester.pumpAndSettle();
+    await settle(tester);
 
     final content =
         await pollContent(tester, created.id, (c) => c == 'autosaved body');
@@ -125,17 +142,15 @@ void main() {
 
   testWidgets('drawing a stroke persists locally and survives a Text/Draw toggle',
       (tester) async {
-    final created =
-        await state.createNote(title: 'Sketch', noteType: 'handwritten');
-    final note = await state.getNote(created.id);
-    await pumpEditor(tester, note);
+    final created = await newNote(tester, 'Sketch', 'handwritten');
+    await pumpEditor(tester, created);
 
     // Handwritten notes open straight into the ink canvas.
     expect(find.byType(InkCanvas), findsOneWidget);
 
     // Draw a stroke across the canvas.
     await tester.drag(find.byType(InkCanvas), const Offset(40, 40));
-    await tester.pumpAndSettle();
+    await settle(tester);
 
     expect(await pollStrokes(tester, created.id), isNotEmpty);
 
@@ -151,6 +166,31 @@ void main() {
     expect(canvas.initialStrokes, isNotEmpty);
 
     // And the drawing is still on disk after the round-trip.
-    expect(await service.getStrokesForNote(created.id), isNotEmpty);
+    expect(await io(tester, () => service.getStrokesForNote(created.id)),
+        isNotEmpty);
+  });
+
+  testWidgets('deleting from the editor asks for confirmation first',
+      (tester) async {
+    final created = await newNote(tester, 'Keep me', 'typed');
+    await pumpEditor(tester, created);
+
+    Future<bool> isDeleted() => io(tester, () async {
+          return (await service.getNoteById(created.id))!.isDeleted;
+        });
+
+    await tester.tap(find.byTooltip('Delete note'));
+    await tester.pumpAndSettle();
+    expect(find.text('Delete note?'), findsOneWidget);
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
+    await settle(tester);
+    expect(await isDeleted(), isFalse);
+
+    await tester.tap(find.byTooltip('Delete note'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Delete'));
+    await settle(tester);
+    expect(await isDeleted(), isTrue);
   });
 }

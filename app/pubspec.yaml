@@ -27,6 +27,7 @@ dependencies:
 
   # UUID pour les IDs locaux
   uuid: ^4.3.3
+  path: ^1.9.0
   path_provider: ^2.1.5
   xdg_directories: ^1.1.0
 

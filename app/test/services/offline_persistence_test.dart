@@ -1,6 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:sqflite/sqflite.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 import 'package:nexanote/data/database/schema.dart';
@@ -120,5 +119,35 @@ void main() {
 
     final after = await service.getNoteById(note.id);
     expect(after!.syncStatus, 'modified');
+  });
+
+  test('concurrent title, text and ink saves never clobber each other',
+      () async {
+    final created = await state.createNote(title: 'Old', noteType: 'mixed');
+
+    // The editor can have a debounced text save, a title rename and an ink
+    // save in flight at the same time. Each one must only touch its own
+    // field, so none of them writes back a stale copy of the others.
+    await Future.wait([
+      state.savePageText(created.id, 1, 'typed body'),
+      state.updateNoteTitle(created.id, 'New title'),
+      state.savePageInk(created.id, 1, sampleStrokes()),
+    ]);
+
+    final reopened = await state.getNote(created.id);
+    expect(reopened.title, 'New title');
+    expect(reopened.pages!.first.typedContent, 'typed body');
+    expect(reopened.pages!.first.strokes, hasLength(2));
+  });
+
+  test('a rename racing an ink save keeps the new title', () async {
+    final created = await state.createNote(title: 'Old', noteType: 'mixed');
+
+    await Future.wait([
+      state.savePageInk(created.id, 1, sampleStrokes()),
+      state.updateNoteTitle(created.id, 'Renamed'),
+    ]);
+
+    expect((await service.getNoteById(created.id))!.title, 'Renamed');
   });
 }

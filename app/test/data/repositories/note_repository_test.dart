@@ -5,6 +5,7 @@ import 'package:nexanote/data/database/schema.dart';
 import 'package:nexanote/data/repositories/note_repository.dart';
 import 'package:nexanote/data/models/stroke.dart';
 import 'package:nexanote/data/models/point.dart';
+import 'package:nexanote/data/models/note.dart';
 
 void main() {
   setUpAll(() {
@@ -257,6 +258,185 @@ void main() {
       final strokesB = await repo.getStrokesForNote(noteB.id);
       expect(strokesA, hasLength(1));
       expect(strokesB, isEmpty);
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // Edit revisions (local-first saves)
+  // -----------------------------------------------------------------------
+
+  group('edit revisions', () {
+    Stroke stroke(String id, String noteId) => Stroke(
+          id: id,
+          noteId: noteId,
+          createdAt: DateTime.utc(2024),
+          points: const [StrokePoint(x: 1, y: 2)],
+        );
+
+    Note serverCopy(String id, {String title = 'Server', String text = ''}) {
+      final at = DateTime.utc(2024, 1, 1);
+      return Note(
+        id: id,
+        remoteId: id,
+        title: title,
+        typedContent: text,
+        syncStatus: 'synced',
+        createdAt: at,
+        updatedAt: at,
+      );
+    }
+
+    test('every edit bumps its own part only', () async {
+      final note = await repo.createNote('A');
+      await repo.updateNoteFields(note.id, {'title': 'B'}, NotePart.title);
+      await repo.updateNoteFields(
+          note.id, {'typed_content': 'x'}, NotePart.text);
+      await repo.updateNoteFields(
+          note.id, {'typed_content': 'xy'}, NotePart.text);
+      final rev = await repo.recordInk(note.id, [stroke('s1', note.id)]);
+
+      final stored = (await repo.getNoteById(note.id))!;
+      expect(stored.titleRev, 1);
+      expect(stored.textRev, 2);
+      expect(stored.inkRev, 1);
+      expect(rev, 1);
+    });
+
+    test('recording ink for a missing note writes nothing', () async {
+      expect(await repo.recordInk('gone', [stroke('s1', 'gone')]), isNull);
+      expect(await repo.getStrokesForNote('gone'), isEmpty);
+    });
+
+    test('a confirmation for an older revision leaves a newer edit pending',
+        () async {
+      final id = await repo.cacheRemoteNote(serverCopy('srv-1'), const []);
+      await repo.updateNoteFields(id, {'typed_content': 'A'}, NotePart.text);
+      await repo.updateNoteFields(id, {'typed_content': 'B'}, NotePart.text);
+
+      // The save of A (revision 1) comes back after B was recorded.
+      await repo.markPartSynced(id, NotePart.text, 1);
+      var stored = (await repo.getNoteById(id))!;
+      expect(stored.textPending, isTrue);
+      expect(stored.syncStatus, 'modified');
+
+      await repo.markPartSynced(id, NotePart.text, 2);
+      // A late confirmation of A can't move it back.
+      await repo.markPartSynced(id, NotePart.text, 1);
+      stored = (await repo.getNoteById(id))!;
+      expect(stored.textPending, isFalse);
+      expect(stored.textSyncedRev, 2);
+      expect(stored.syncStatus, 'synced');
+    });
+
+    test('caching the server copy keeps parts with a pending local edit',
+        () async {
+      final id = await repo.cacheRemoteNote(
+          serverCopy('srv-1', title: 'T0', text: 'old'),
+          [stroke('s0', 'srv-1')]);
+      await repo.updateNoteFields(id, {'typed_content': 'mine'}, NotePart.text);
+      await repo.recordInk(id, [stroke('s1', id), stroke('s2', id)]);
+
+      await repo.cacheRemoteNote(
+          serverCopy('srv-1', title: 'T1', text: 'theirs'),
+          [stroke('s9', 'srv-1')]);
+
+      final stored = (await repo.getNoteById(id))!;
+      expect(stored.title, 'T1'); // nothing pending: refreshed
+      expect(stored.typedContent, 'mine');
+      expect((await repo.getStrokesForNote(id)).map((s) => s.id), ['s1', 's2']);
+    });
+
+    test('caching resolves a note uploaded from local mode to its row',
+        () async {
+      final note = await repo.createNote('Offline');
+      await repo.setNoteRemoteId(note.id, 'srv-7', null);
+      await repo.markNoteSyncedIfUnchanged(note.id, note.updatedAt);
+
+      final id = await repo.cacheRemoteNote(serverCopy('srv-7'), const []);
+
+      expect(id, note.id);
+      expect(await repo.getAllNotes(), hasLength(1));
+    });
+
+    test('caching never overwrites a row that still has to be uploaded',
+        () async {
+      final note = await repo.createNote('Offline');
+      await repo.updateNoteFields(
+          note.id, {'typed_content': 'only copy'}, NotePart.text);
+      await repo.setNoteRemoteId(note.id, 'srv-8', null); // still local_only
+      await repo.replaceStrokesForNote(note.id, [stroke('s1', note.id)]);
+
+      final id = await repo.cacheRemoteNote(
+          serverCopy('srv-8', text: 'empty on the server'), const []);
+
+      // It is the local copy of that note, left for pushLocal to finish:
+      // no second row, and nothing of it is moved or replaced.
+      expect(id, note.id);
+      expect(await repo.getAllNotes(), hasLength(1));
+      expect((await repo.getNoteById(note.id))!.typedContent, 'only copy');
+      expect(await repo.getStrokesForNote(note.id), hasLength(1));
+    });
+
+    test('a stroke id used by another note never moves it over', () async {
+      final a = await repo.createNote('A');
+      final b = await repo.createNote('B');
+      await repo.replaceStrokesForNote(a.id, [stroke('same', a.id)]);
+
+      await repo.replaceStrokesForNote(b.id, [stroke('same', b.id)]);
+      await repo.replaceStrokesForNote(b.id, [stroke('same', b.id)]);
+
+      expect(await repo.getStrokesForNote(a.id), hasLength(1));
+      expect(await repo.getStrokesForNote(b.id), hasLength(1));
+      expect((await repo.getStrokesForNote(b.id)).single.points, hasLength(1));
+    });
+
+    test('text typed in local mode over a note without content becomes a '
+        'note of its own', () async {
+      final at = DateTime.utc(2024, 1, 1);
+      await repo.upsertNote(Note(
+        id: 'srv-3',
+        remoteId: 'srv-3',
+        title: 'Pulled',
+        syncStatus: 'synced',
+        hasContent: false,
+        createdAt: at,
+        updatedAt: at,
+      ));
+      await repo.updateNoteFields(
+          'srv-3', {'typed_content': 'typed blind'}, NotePart.text, true);
+      await repo.recordInk('srv-3', [stroke('s1', 'srv-3')], blind: true);
+
+      await repo.cacheRemoteNote(
+          serverCopy('srv-3', text: 'the real text'), [stroke('r1', 'srv-3')]);
+
+      final original = (await repo.getNoteById('srv-3'))!;
+      expect(original.typedContent, 'the real text');
+      expect(original.hasPendingEdits, isFalse);
+      expect((await repo.getStrokesForNote('srv-3')).map((s) => s.id), ['r1']);
+      final copy =
+          (await repo.getAllNotes()).singleWhere((n) => n.id != 'srv-3');
+      expect(copy.title, 'Pulled (offline copy)');
+      expect(copy.typedContent, 'typed blind');
+      expect(copy.syncStatus, 'local_only');
+      expect(await repo.getStrokesForNote(copy.id), hasLength(1));
+    });
+
+    test('a pull applied from an older snapshot keeps a pending edit',
+        () async {
+      final id = await repo.cacheRemoteNote(serverCopy('srv-1'), const []);
+      final snapshot = (await repo.getNoteById(id))!;
+      await repo.updateNoteFields(id, {'title': 'Mine'}, NotePart.title);
+
+      await repo.applyPulledNote(
+          id,
+          snapshot.copyWith(
+              title: 'Theirs', updatedAt: DateTime.utc(2030), isPinned: true));
+
+      final stored = (await repo.getNoteById(id))!;
+      expect(stored.title, 'Mine');
+      expect(stored.titlePending, isTrue);
+      expect(await repo.hardDeleteNoteIfSynced(id), 0);
+      expect(await repo.getNotesWithPendingEdits(), hasLength(1));
     });
   });
 }

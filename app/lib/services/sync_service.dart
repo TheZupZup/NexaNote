@@ -3,6 +3,7 @@ import 'dart:convert';
 import '../data/models/note.dart';
 import '../data/models/notebook.dart';
 import 'api_client.dart' as api;
+import 'ink_json.dart';
 import 'local_note_service.dart';
 import 'title_cleaner.dart' as title_cleaner;
 
@@ -70,34 +71,144 @@ class SyncService {
     );
   }
 
-  /// Uploads only locally-originated records that have never been seen on
-  /// the server. A row is considered "needs push" iff it has no
-  /// [Note.remoteId] AND its `syncStatus` is not `synced`. After a pull,
-  /// every adopted note carries `synced` plus a `remoteId`, so subsequent
-  /// pushes are no-ops until the user creates something new.
-  Future<_PushCounts> pushLocal() async {
+  /// Uploads locally-originated records the server has never seen.
+  ///
+  /// Notebooks are created first and the local row is re-keyed to the id the
+  /// server minted, so notes are filed under a notebook the server knows.
+  ///
+  /// A note is created, then its text and drawing are uploaded, then it is
+  /// marked `synced` with the server id as its [Note.remoteId]. If an upload
+  /// fails after the create, the note stays `local_only` with its remoteId
+  /// set and the next push resumes the upload instead of creating it again.
+  /// Adopted notes (remoteId set by a pull, status synced/modified/conflict)
+  /// are never pushed: local rows of pulled notes hold no page content, so
+  /// uploading them would blank the server copy.
+  Future<PushCounts> pushLocal() async {
     final snapshot = await _local.exportAllData();
     var notebooks = 0;
     var notes = 0;
+    final serverNotebookIds = <String, String>{};
     for (final nb in snapshot.notebooks) {
-      if (_isAlreadySynced(nb.syncStatus)) continue;
-      await _api.createNotebook(name: nb.name, color: nb.color);
+      if (_isAlreadySynced(nb.syncStatus)) {
+        serverNotebookIds[nb.id] = nb.id;
+        continue;
+      }
+      final created = await _api.createNotebook(name: nb.name, color: nb.color);
+      await _local.adoptRemoteNotebook(
+        nb.id,
+        nb.copyWith(syncStatus: 'synced').withId(created.id),
+      );
+      serverNotebookIds[nb.id] = created.id;
       notebooks++;
     }
     for (final note in snapshot.notes) {
       if (_isAlreadySynced(note.syncStatus)) continue;
-      // Already adopted from a remote .md file — never re-create on the
-      // server. The non-idempotent createNote endpoint would mint a fresh
-      // UUID and a duplicate file alongside the existing one.
-      if (note.remoteId != null && note.remoteId!.isNotEmpty) continue;
-      await _api.createNote(
-        title: cleanRemoteTitle(note.title),
-        noteType: note.noteType,
-        notebookId: note.notebookId,
-      );
-      notes++;
+      final pendingUpload = note.syncStatus == 'local_only';
+      final remoteId = note.remoteId;
+      final hasRemote = remoteId != null && remoteId.isNotEmpty;
+      if (hasRemote && !pendingUpload) continue;
+      var target = hasRemote ? remoteId : null;
+      if (target != null) {
+        // Resuming an upload interrupted after the create. Only write into
+        // that remote note if it is provably still exactly as our last write
+        // left it; anything else (edited online, even emptied on purpose, or
+        // a state we can't compare) keeps both versions.
+        final server = await _remoteNoteOrNull(target);
+        if (server == null) {
+          target = null; // deleted on the server meanwhile: create it again
+        } else if (!_isAsWeLeftIt(server, note.remoteBaseline)) {
+          final copy = await _api.createNote(
+            title: _offlineCopyTitle(note.title),
+            noteType: note.noteType,
+            notebookId: server.notebookId,
+          );
+          // From now on the copy is this row's remote note: if its upload
+          // fails too, the next push resumes into it (same proof rules)
+          // instead of leaving it empty and creating another one.
+          await _local.setNoteRemoteId(note.id, copy.id, copy.updatedAt);
+          await _uploadContent(note, copy.id, intoFreshNote: true);
+          await _local.markNoteSyncedIfUnchanged(note.id, note.updatedAt);
+          notes++;
+          continue;
+        }
+      }
+      if (target == null) {
+        // Deleted before it ever reached the server: nothing to propagate.
+        if (note.isDeleted) continue;
+        final notebookId = note.notebookId;
+        final created = await _api.createNote(
+          title: cleanRemoteTitle(note.title),
+          noteType: note.noteType,
+          // A notebook deleted locally is unknown to the server, which would
+          // reject the note; file it unsorted rather than abort the push.
+          notebookId: notebookId == null ? null : serverNotebookIds[notebookId],
+        );
+        target = created.id;
+        await _local.setNoteRemoteId(note.id, target, created.updatedAt);
+        notes++;
+        await _uploadContent(note, target, intoFreshNote: true);
+      } else {
+        await _uploadContent(note, target, intoFreshNote: false);
+      }
+      await _local.markNoteSyncedIfUnchanged(note.id, note.updatedAt);
     }
-    return _PushCounts(notebooks: notebooks, notes: notes);
+    return PushCounts(notebooks: notebooks, notes: notes);
+  }
+
+  /// Uploads the note's text and drawing into [remoteId]. After each write
+  /// the version the server reports becomes the row's baseline, so if the
+  /// next write fails, a resume can still tell "only our own writes since"
+  /// apart from "changed by someone else" (and not make an offline copy of
+  /// a note that is just half uploaded).
+  ///
+  /// Empty parts are skipped only [intoFreshNote]: a resumed upload may
+  /// already have put text or strokes there that the user has removed
+  /// since.
+  Future<void> _uploadContent(
+    Note note,
+    String remoteId, {
+    required bool intoFreshNote,
+  }) async {
+    if (note.typedContent.isNotEmpty || !intoFreshNote) {
+      final version = await _api.savePageText(remoteId, 1, note.typedContent);
+      await _local.setNoteRemoteId(note.id, remoteId, version);
+    }
+    final strokes = await _local.getStrokesForNote(note.id);
+    if (strokes.isNotEmpty || !intoFreshNote) {
+      final version = await _api.savePageInk(
+          remoteId, 1, strokes.map(inkJsonFromStroke).toList());
+      await _local.setNoteRemoteId(note.id, remoteId, version);
+    }
+  }
+
+  static const _offlineCopySuffix = ' (offline copy)';
+
+  static String _offlineCopyTitle(String title) {
+    final clean = cleanRemoteTitle(title);
+    return clean.endsWith(_offlineCopySuffix)
+        ? clean
+        : '$clean$_offlineCopySuffix';
+  }
+
+  Future<api.Note?> _remoteNoteOrNull(String id) async {
+    try {
+      return await _api.getNote(id);
+    } on api.ApiException catch (e) {
+      if (e.statusCode == 404) return null;
+      rethrow;
+    }
+  }
+
+  /// True only when [server] is still exactly as our push left it: its
+  /// updated_at is the one recorded after our create or our last content
+  /// write ([baseline]). Every server-side write moves updated_at, so a note
+  /// edited elsewhere, emptied, or edited and reverted does not pass.
+  /// Without a comparable baseline there is no proof, so this is false.
+  static bool _isAsWeLeftIt(api.Note server, String? baseline) {
+    final ours = baseline == null ? null : DateTime.tryParse(baseline);
+    final current = DateTime.tryParse(server.updatedAt);
+    if (ours == null || current == null) return false;
+    return current.isAtSameMomentAs(ours);
   }
 
   static bool _isAlreadySynced(String status) => status == 'synced';
@@ -117,7 +228,7 @@ class SyncService {
   /// - When a remote note carries the same cleaned title as an unrelated
   ///   local row (different id), both are kept and the local row is
   ///   flagged with `sync_status='conflict'`.
-  Future<_PullCounts> pullRemote() async {
+  Future<PullCounts> pullRemote() async {
     final remoteNotebooks = await _api.getNotebooks();
     final remoteNotes = await _api.getNotes(includeDeleted: true);
 
@@ -168,26 +279,28 @@ class SyncService {
           localByRemoteId[r.id] ??
           (derivedPath != null ? localByRemotePath[derivedPath] : null);
       if (existing != null) {
-        // Same identity on both sides — newer timestamp wins, but a local
-        // 'modified' row beats an older or equal-time remote so user edits
-        // aren't clobbered before the next push round.
-        final remoteUpdated = _parseUtc(r.updatedAt);
-        final keepLocal = existing.syncStatus == 'modified' &&
-            existing.updatedAt.isAfter(remoteUpdated);
-        if (keepLocal) continue;
-        await _local.upsertNote(existing.copyWith(
-          notebookId: r.notebookId,
-          clearNotebookId: r.notebookId == null,
-          title: cleanedRemoteTitle,
-          noteType: r.noteType,
-          tags: r.tags,
-          isPinned: r.isPinned,
-          isDeleted: r.isDeleted,
-          syncStatus: 'synced',
-          remoteId: r.id,
-          remotePath: derivedPath ?? existing.remotePath,
-          updatedAt: remoteUpdated,
-        ));
+        // Same identity on both sides: newer timestamp wins, but a local
+        // edit the server doesn't have yet is never clobbered. A local_only
+        // row with a remoteId was created by our own push and still has
+        // content to upload; adopting the remote copy now would mark it
+        // synced and the upload would never be retried. Decided against the
+        // row as it is when written, since the editor may be saving into it
+        // while this pull runs.
+        await _local.applyPulledNote(
+          existing.id,
+          existing.copyWith(
+            notebookId: r.notebookId,
+            clearNotebookId: r.notebookId == null,
+            title: cleanedRemoteTitle,
+            noteType: r.noteType,
+            tags: r.tags,
+            isPinned: r.isPinned,
+            isDeleted: r.isDeleted,
+            remoteId: r.id,
+            remotePath: derivedPath ?? existing.remotePath,
+            updatedAt: _parseUtc(r.updatedAt),
+          ),
+        );
         continue;
       }
 
@@ -197,13 +310,10 @@ class SyncService {
       final titleClash =
           localTitleIndex[cleanedRemoteTitle.toLowerCase()];
       if (titleClash != null && titleClash.remoteId == null) {
-        await _local.upsertNote(titleClash.copyWith(
-          syncStatus: 'conflict',
-          updatedAt: titleClash.updatedAt,
-        ));
+        await _local.markNoteConflict(titleClash.id);
       }
 
-      await _local.upsertNote(_toLocalNote(
+      await _local.insertNoteIfAbsent(_toLocalNote(
         r,
         cleanedTitle: cleanedRemoteTitle,
         derivedPath: derivedPath,
@@ -223,11 +333,11 @@ class SyncService {
       // Drop only fully-synced rows. Local-only / modified / conflict
       // rows are preserved; the next push promotes them upstream.
       if (localNote.syncStatus == 'synced') {
-        await _local.hardDeleteNote(localNote.id);
+        await _local.hardDeleteNoteIfSynced(localNote.id);
       }
     }
 
-    return _PullCounts(
+    return PullCounts(
       notebooks: remoteNotebooks.length,
       notes: remoteNotes.length,
       adopted: adopted,
@@ -265,6 +375,8 @@ class SyncService {
       syncStatus: 'synced',
       remoteId: n.id,
       remotePath: derivedPath ?? _derivedRemotePath(n.id),
+      // A pull lists notes without their pages.
+      hasContent: false,
       createdAt: created,
       updatedAt: updated,
     );
@@ -302,17 +414,19 @@ class SyncService {
       title_cleaner.cleanRemoteTitle(raw);
 }
 
-class _PushCounts {
+/// Records created on the server by [SyncService.pushLocal].
+class PushCounts {
   final int notebooks;
   final int notes;
-  const _PushCounts({required this.notebooks, required this.notes});
+  const PushCounts({required this.notebooks, required this.notes});
 }
 
-class _PullCounts {
+/// What [SyncService.pullRemote] read from the server.
+class PullCounts {
   final int notebooks;
   final int notes;
   final int adopted;
-  const _PullCounts({
+  const PullCounts({
     required this.notebooks,
     required this.notes,
     required this.adopted,

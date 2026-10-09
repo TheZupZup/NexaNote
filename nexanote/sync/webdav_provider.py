@@ -16,13 +16,16 @@ rclone, Cyberduck…) de parcourir et synchroniser les notes.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import io
 import json
 import logging
 import re
+import threading
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 from wsgidav.dav_provider import DAVCollection, DAVNonCollection, DAVProvider
@@ -40,7 +43,7 @@ HTTP_INTERNAL_ERROR = getattr(_dav_error, "HTTP_INTERNAL_ERROR", 500)
 HTTP_BAD_REQUEST = getattr(_dav_error, "HTTP_BAD_REQUEST", 400)
 
 from nexanote.models.note import InkStroke, Note, Notebook, NoteType, Page, Point
-from nexanote.storage.file_store import FileNoteStore
+from nexanote.storage.file_store import FileNoteStore, _atomic_write
 
 logger = logging.getLogger("nexanote.webdav")
 
@@ -303,6 +306,7 @@ class NotebookCollection(DAVCollection):
             )
             note.add_page()
             self.db.save_note(note)
+            _placeholders(self.db).record(self.db.get_note(note.id, load_pages=True))
         except Exception as exc:
             logger.exception("MKCOL note failed: %s", name)
             raise _safe_dav_error(exc, "could not create note") from exc
@@ -577,64 +581,292 @@ class _NoteMetaWriter(io.RawIOBase):
                 context_info=f"invalid note.json body: {exc}",
             ) from exc
 
-        try:
-            # If MKCOL minted a placeholder id that the PUT body now wants to
-            # replace (e.g. client and server both generated UUIDs sharing
-            # only the slug's 8-char prefix), drop the placeholder so the
-            # client's full id wins. Without this the on-disk file id would
-            # diverge from the client's id and break future updates.
-            payload_id = payload.get("id")
-            if (
-                isinstance(payload_id, str)
-                and payload_id
-                and payload_id != self.note.id
-            ):
-                old_id = self.note.id
-                self.note.id = payload_id
-                for page in self.note.pages:
-                    page.note_id = payload_id
-                try:
-                    self.db.delete_note_permanent(old_id)
-                except Exception:
-                    logger.warning(
-                        "could not delete placeholder note %s — ignoring", old_id
-                    )
-
-            self.note.title = payload.get("title", self.note.title)
-            self.note.tags = payload.get("tags", self.note.tags) or []
-            self.note.is_pinned = bool(
-                payload.get("is_pinned", self.note.is_pinned)
-            )
-            note_type = payload.get("type")
-            if note_type:
-                try:
-                    self.note.note_type = NoteType(note_type)
-                except ValueError:
-                    logger.warning("ignoring unknown note type: %s", note_type)
-            for page_data in payload.get("pages") or []:
-                page_number = page_data.get("page_number")
-                if page_number is None:
-                    continue
-                page = self.note.get_page(page_number)
-                if page is None:
-                    page = Page(
-                        note_id=self.note.id,
-                        page_number=int(page_number),
-                        template=page_data.get("template", "blank"),
-                    )
-                    self.note.pages.append(page)
-                page.typed_content = page_data.get(
-                    "typed_content", page.typed_content
+        # Phase 1: validate the whole body and build the resulting note in
+        # memory. Nothing on disk changes until it is complete, so a bad
+        # payload can't leave a half-claimed placeholder behind.
+        fields = _parse_note_payload(payload)
+        placeholder_id: Optional[str] = None
+        payload_id = fields["id"]
+        target = copy.deepcopy(self.note)
+        if payload_id and payload_id != self.note.id:
+            # EN: The note behind this path can also be a real note found by
+            #     the title-slug or id-prefix fallbacks, and a real note can be
+            #     empty and share the 8-char prefix. Only a recorded,
+            #     untouched MKCOL placeholder may be replaced; anything else
+            #     gets a 409.
+            # FR: Seul un placeholder enregistré et intact peut être remplacé.
+            if not _is_placeholder_for(self.db, self.note, payload_id):
+                raise DAVError(
+                    HTTP_CONFLICT,
+                    context_info="note.json id does not match the note at this path",
                 )
-            self.note.pages.sort(key=lambda p: p.page_number)
-            self.note.touch()
-            self.db.save_note(self.note)
-            logger.info("Note mise à jour via WebDAV PUT : %s", self.note.title)
-        except DAVError:
-            raise
+            placeholder_id = self.note.id
+            existing = self.db.get_note(payload_id, load_pages=True)
+            if existing is not None:
+                # The client's note already exists here (e.g. it moved to this
+                # notebook): update it, keeping its pages and drawings. A page
+                # this client already sent ink for (into the placeholder)
+                # takes that ink, as the same PUT on the real note would have.
+                existing.notebook_id = self.note.notebook_id
+                for page in copy.deepcopy(self.note.pages):
+                    if not page.strokes:
+                        continue
+                    current = existing.get_page(page.page_number)
+                    if current is None:
+                        page.note_id = payload_id
+                        existing.pages.append(page)
+                    else:
+                        current.strokes = page.strokes
+                target = existing
+            else:
+                target.id = payload_id
+                for page in target.pages:
+                    page.note_id = payload_id
+
+        if fields["title"] is not None:
+            target.title = fields["title"]
+        if fields["tags"] is not None:
+            target.tags = fields["tags"]
+        if fields["is_pinned"] is not None:
+            target.is_pinned = fields["is_pinned"]
+        if fields["note_type"] is not None:
+            target.note_type = fields["note_type"]
+        for page_data in fields["pages"]:
+            page = target.get_page(page_data["page_number"])
+            if page is None:
+                page = Page(
+                    note_id=target.id,
+                    page_number=page_data["page_number"],
+                    template=page_data["template"] or "blank",
+                )
+                target.pages.append(page)
+            if page_data["typed_content"] is not None:
+                page.typed_content = page_data["typed_content"]
+            _apply_client_timestamp(page, page_data["updated_at"])
+        target.pages.sort(key=lambda p: p.page_number)
+        if not _apply_client_timestamp(target, fields["updated_at"]):
+            target.touch()
+
+        # Phase 2: commit, then clean up. The placeholder (and its registry
+        # entry) is only removed once the claimed note is safely saved.
+        try:
+            self.db.save_note(target)
         except Exception as exc:
             logger.exception("note.json write failed")
             raise _safe_dav_error(exc, "saving note failed") from exc
+        self.note = target
+        if placeholder_id is not None:
+            self._drop_placeholder(placeholder_id)
+        logger.info("Note mise à jour via WebDAV PUT : %s", target.title)
+
+    def _drop_placeholder(self, placeholder_id: str) -> None:
+        try:
+            self.db.delete_note_permanent(placeholder_id)
+        except Exception:
+            # Keep it registered: still claimable later, not an orphan.
+            logger.warning("could not delete placeholder note %s", placeholder_id)
+            return
+        _placeholders(self.db).remove(placeholder_id)
+        # In the plain store the claimed note was saved while the placeholder
+        # still owned "<title>.md"; saving again takes that name back instead
+        # of leaving "<title> (2).md".
+        try:
+            self.db.save_note(self.note)
+        except Exception:
+            logger.warning("could not re-save claimed note %s", self.note.id)
+
+
+def _parse_note_payload(payload) -> dict:
+    """
+    Validates a note.json body and returns its fields normalised (None for
+    absent ones). Raises a 400 before anything is written when the body is
+    malformed: wrong types, a page_number that isn't a positive integer...
+    """
+
+    def bad(reason: str) -> DAVError:
+        return DAVError(HTTP_BAD_REQUEST, context_info=f"invalid note.json: {reason}")
+
+    if not isinstance(payload, dict):
+        raise bad("body is not an object")
+
+    def optional(key, kind):
+        value = payload.get(key)
+        if value is not None and not isinstance(value, kind):
+            raise bad(f"{key} has the wrong type")
+        return value
+
+    note_id = optional("id", str)
+    title = optional("title", str)
+    tags = payload.get("tags")
+    if tags is not None and not (
+        isinstance(tags, list) and all(isinstance(t, str) for t in tags)
+    ):
+        raise bad("tags must be a list of strings")
+    is_pinned = payload.get("is_pinned")
+    note_type = None
+    raw_type = optional("type", str)
+    if raw_type:
+        try:
+            note_type = NoteType(raw_type)
+        except ValueError:
+            logger.warning("ignoring unknown note type: %s", raw_type)
+
+    raw_pages = payload.get("pages")
+    if raw_pages is None:
+        raw_pages = []
+    if not isinstance(raw_pages, list):
+        raise bad("pages must be a list")
+    pages = []
+    for raw in raw_pages:
+        if not isinstance(raw, dict):
+            raise bad("each page must be an object")
+        number = raw.get("page_number")
+        if isinstance(number, str) and number.isdigit():
+            number = int(number)
+        if isinstance(number, bool) or not isinstance(number, int) or number < 1:
+            raise bad("page_number must be a positive integer")
+        typed = raw.get("typed_content")
+        if typed is not None and not isinstance(typed, str):
+            raise bad("typed_content must be a string")
+        template = raw.get("template")
+        if template is not None and not isinstance(template, str):
+            raise bad("template must be a string")
+        pages.append({
+            "page_number": number,
+            "typed_content": typed,
+            "template": template,
+            "updated_at": raw.get("updated_at"),
+        })
+
+    return {
+        "id": note_id or None,
+        "title": title,
+        "tags": tags,
+        "is_pinned": bool(is_pinned) if is_pinned is not None else None,
+        "note_type": note_type,
+        "pages": pages,
+        "updated_at": payload.get("updated_at"),
+    }
+
+
+def _is_placeholder_for(db: FileNoteStore, note: Note, payload_id: str) -> bool:
+    """
+    True only for a stand-in note this server created itself (MKCOL, or a
+    PUT into a path that didn't exist yet) for the client note `payload_id`,
+    and that nobody has changed since. Being empty and sharing the id prefix
+    is not enough: a real note can be both.
+
+    "Unchanged" is checked against the fingerprint recorded with the
+    placeholder (title, type, tags, flags, notebook, pages, strokes), so any
+    edit made to it through the app, whatever the field, makes it a real note
+    that a client's push must not replace. Ink the client itself sends into
+    the placeholder updates the recorded fingerprint.
+    """
+    if note.id[:8] != payload_id[:8]:
+        return False
+    return _placeholders(db).matches(note)
+
+
+def _note_fingerprint(note: Note) -> str:
+    """Digest of everything a user can change on a note (not timestamps)."""
+    state = {
+        "title": note.title,
+        "type": note.note_type.value,
+        "tags": list(note.tags),
+        "pinned": note.is_pinned,
+        "archived": note.is_archived,
+        "deleted": note.is_deleted,
+        "notebook": note.notebook_id,
+        "pages": [
+            [p.page_number, p.template, p.typed_content,
+             [[st.id, len(st.points)] for st in p.strokes]]
+            for p in sorted(note.pages, key=lambda p: p.page_number)
+        ],
+    }
+    raw = json.dumps(state, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+class _PlaceholderRegistry:
+    """
+    EN: Stand-in notes created ahead of a client's note.json, each with the
+        fingerprint of its state as this server last wrote it. Persisted in
+        the data directory so a server restart between MKCOL and PUT doesn't
+        turn the placeholder into an unclaimable note.
+    FR: Notes provisoires créées avant le note.json du client, avec
+        l'empreinte de leur état, persistées pour survivre à un redémarrage.
+    """
+
+    FILE_NAME = ".webdav_placeholders.json"
+    _lock = threading.Lock()
+
+    def __init__(self, data_dir: Path) -> None:
+        self.path = Path(data_dir) / self.FILE_NAME
+
+    def _read(self) -> dict[str, str]:
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return {}
+        except (OSError, ValueError) as exc:
+            # Unreadable registry: claim nothing. A placeholder then gets a
+            # 409 instead of a real note possibly being replaced.
+            logger.warning("unreadable placeholder registry %s: %s", self.path, exc)
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        # Entries without a fingerprint (older formats) can't be verified and
+        # are not claimable.
+        return {k: v for k, v in data.items() if isinstance(k, str) and isinstance(v, str)}
+
+    def _write(self, entries: dict[str, str]) -> None:
+        _atomic_write(self.path, json.dumps(entries, sort_keys=True).encode("utf-8"))
+
+    def record(self, note: Note) -> None:
+        """Registers [note] as a placeholder in its current state."""
+        with self._lock:
+            entries = self._read()
+            entries[note.id] = _note_fingerprint(note)
+            self._write(entries)
+
+    def matches(self, note: Note) -> bool:
+        """True if [note] is a placeholder still in the recorded state."""
+        with self._lock:
+            recorded = self._read().get(note.id)
+        return recorded is not None and recorded == _note_fingerprint(note)
+
+    def remove(self, note_id: str) -> None:
+        with self._lock:
+            entries = self._read()
+            if entries.pop(note_id, None) is not None:
+                self._write(entries)
+
+
+def _placeholders(db: FileNoteStore) -> _PlaceholderRegistry:
+    return _PlaceholderRegistry(db.data_dir)
+
+
+def _apply_client_timestamp(obj, value) -> bool:
+    """
+    EN: Keep the edit time a syncing client sends with note.json / page_N.ink
+        instead of stamping the upload time. Stamping made every uploaded
+        note look newer than edits made on the device right after the
+        upload, so the next pull put the old version back over them.
+        Returns False when no usable timestamp was sent.
+    FR: Conserve l'heure de modification envoyée par le client plutôt que
+        l'heure d'envoi, sinon la note paraît plus récente que les
+        modifications faites juste après sur l'appareil.
+    """
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return False
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    obj.updated_at = parsed
+    return True
 
 
 class InkFile(DAVNonCollection):
@@ -754,6 +986,28 @@ class _InkWriter(io.RawIOBase):
                 context_info=f"invalid ink page body: {exc}",
             ) from exc
 
+        # EN: Like note.json, an ink page addressed to another note (the
+        #     NexaNote client sends its note_id) must not overwrite the note
+        #     this path resolved to through the slug/prefix fallbacks. The
+        #     one exception is the client's own claimable placeholder (ink
+        #     that lands before note.json).
+        # FR: Un .ink destiné à une autre note est refusé (409), sauf pour le
+        #     placeholder réclamable de ce client.
+        payload_note_id = payload.get("note_id")
+        if (
+            isinstance(payload_note_id, str)
+            and payload_note_id
+            and payload_note_id != self.note.id
+            and not _is_placeholder_for(self.db, self.note, payload_note_id)
+        ):
+            raise DAVError(
+                HTTP_CONFLICT,
+                context_info="page ink note_id does not match the note at this path",
+            )
+        # Ink the client sends into its own, still untouched placeholder keeps
+        # it claimable: the recorded fingerprint follows this write.
+        untouched_placeholder = _placeholders(self.db).matches(self.note)
+
         try:
             new_strokes: list[InkStroke] = []
             for s_data in payload.get("strokes") or []:
@@ -776,10 +1030,21 @@ class _InkWriter(io.RawIOBase):
                 new_strokes.append(stroke)
 
             self.page.strokes = new_strokes
-            self.page.touch()
+            if _apply_client_timestamp(self.page, payload.get("updated_at")):
+                # The note's own timestamp arrives with note.json; only move
+                # it forward if this drawing is newer.
+                if self.page.updated_at > self.note.updated_at:
+                    self.note.updated_at = self.page.updated_at
+            else:
+                self.page.touch()
+                self.note.touch()
             self.db.save_page(self.page)
-            self.note.touch()
             self.db.save_note(self.note, save_pages=False)
+            # Strokes the client sends into its own placeholder don't stop
+            # the placeholder from being claimed; strokes drawn in it through
+            # the app do (see _is_placeholder_for).
+            if untouched_placeholder:
+                _placeholders(self.db).record(self.note)
             logger.info(
                 "Page %d mise à jour : %d strokes",
                 self.page.page_number,
@@ -911,6 +1176,7 @@ def _materialize_note(
         )
         note.add_page()
         db.save_note(note)
+        _placeholders(db).record(db.get_note(note.id, load_pages=True))
     except Exception:
         logger.exception("auto-materialize note failed: %s", slug)
         return None

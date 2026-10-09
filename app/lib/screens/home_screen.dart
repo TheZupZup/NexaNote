@@ -5,7 +5,6 @@ import '../services/api_client.dart';
 import '../widgets/notebook_sidebar.dart';
 import '../widgets/notes_list.dart';
 import 'note_editor_screen.dart';
-import 'settings_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -41,7 +40,7 @@ class _DesktopLayout extends StatelessWidget {
           notebooks: state.notebooks,
           selected: state.selectedNotebook,
           onSelect: state.selectNotebook,
-          onCreate: () => _createNotebook(context),
+          onCreate: () => _promptCreateNotebook(context),
           onSync: () => _sync(context),
           isSyncing: state.isSyncing,
           hasSyncError: state.syncError != null,
@@ -52,6 +51,7 @@ class _DesktopLayout extends StatelessWidget {
         SizedBox(width: 300, child: Column(children: [
           _NotesHeader(
             title: state.selectedNotebook?.name ?? 'All Notes',
+            initialQuery: state.searchQuery,
             onSearch: (q) => state.loadNotes(notebookId: state.selectedNotebook?.id, search: q),
             onNewNote: () => _createNote(context),
           ),
@@ -59,34 +59,25 @@ class _DesktopLayout extends StatelessWidget {
             notes: state.notes,
             selected: state.selectedNote,
             isLoading: state.isLoading,
-            onSelect: (note) async {
-              final full = await state.getNote(note.id);
-              state.selectNote(full);
-            },
+            onSelect: (note) => _openNote(context, note.id),
             onDelete: (note) => state.deleteNote(note.id),
           )),
         ])),
         VerticalDivider(width: 1, color: scheme.outlineVariant),
         Expanded(child: state.selectedNote != null
-          ? NoteEditorScreen(note: state.selectedNote!)
+          // Keyed by note id: without it Flutter reuses the editor State
+          // and keeps showing (and saving to) the previously opened note.
+          ? NoteEditorScreen(
+              key: ValueKey(state.selectedNote!.id),
+              note: state.selectedNote!)
           : _EmptyEditor()),
       ])),
       ]),
     );
   }
 
-  Future<void> _createNotebook(BuildContext context) async {
-    final name = await _inputDialog(context, 'New Notebook', 'Name');
-    if (name != null && name.isNotEmpty) {
-      await context.read<AppState>().createNotebook(name, '#6366f1');
-    }
-  }
-
   Future<void> _createNote(BuildContext context) async {
-    final state = context.read<AppState>();
-    final note = await state.createNote(title: 'Untitled', noteType: 'typed');
-    final full = await state.getNote(note.id);
-    state.selectNote(full);
+    await _createAndOpenNote(context);
   }
 
   Future<void> _sync(BuildContext context) async {
@@ -94,6 +85,52 @@ class _DesktopLayout extends StatelessWidget {
     await state.triggerSync();
     if (context.mounted) _showSyncResult(context, state);
   }
+}
+
+/// Opens note [id] and returns it, or null when it is stale (another note was
+/// picked meanwhile) or could not be loaded; the error is shown to the user
+/// instead of the tap silently doing nothing.
+Future<Note?> _openNote(BuildContext context, String id) async {
+  try {
+    return await context.read<AppState>().openNote(id);
+  } catch (e) {
+    if (context.mounted) _showError(context, 'Could not open note: $e');
+    return null;
+  }
+}
+
+/// Creates an untitled note in the current notebook and opens it. A failure
+/// (backend unreachable, server error) is shown rather than dropped.
+Future<Note?> _createAndOpenNote(BuildContext context) async {
+  final state = context.read<AppState>();
+  final Note note;
+  try {
+    note = await state.createNote(title: 'Untitled', noteType: 'typed');
+  } catch (e) {
+    if (context.mounted) _showError(context, 'Could not create note: $e');
+    return null;
+  }
+  if (!context.mounted) return null;
+  return _openNote(context, note.id);
+}
+
+/// Asks for a name and creates the notebook. Blank names are ignored.
+Future<void> _promptCreateNotebook(BuildContext context) async {
+  final state = context.read<AppState>();
+  final name = (await _inputDialog(context, 'New Notebook', 'Name'))?.trim();
+  if (name == null || name.isEmpty) return;
+  try {
+    await state.createNotebook(name, '#6366f1');
+  } catch (e) {
+    if (context.mounted) _showError(context, 'Could not create notebook: $e');
+  }
+}
+
+void _showError(BuildContext context, String message) {
+  ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+    content: Text(message),
+    backgroundColor: Colors.red.shade700,
+  ));
 }
 
 void _showSyncResult(BuildContext context, AppState state) {
@@ -139,14 +176,21 @@ class _MobileLayout extends StatelessWidget {
       body: Column(children: [
         if (!state.isBackendAvailable && !state.localMode)
           _OfflineBanner(message: state.backendErrorMessage),
+        // This layout has no search field, so a search started on the wide
+        // layout must be visible and clearable here.
+        if (state.searchQuery.isNotEmpty)
+          _ActiveSearchBar(
+            query: state.searchQuery,
+            onClear: () => state.loadNotes(
+                notebookId: state.selectedNotebook?.id, search: ''),
+          ),
         Expanded(child: NotesList(
           notes: state.notes,
           selected: state.selectedNote,
           isLoading: state.isLoading,
           onSelect: (note) async {
-            final full = await state.getNote(note.id);
-            state.selectNote(full);
-            if (context.mounted) {
+            final full = await _openNote(context, note.id);
+            if (full != null && context.mounted) {
               Navigator.push(context, MaterialPageRoute(
                 builder: (_) => ChangeNotifierProvider.value(
                   value: state,
@@ -160,10 +204,7 @@ class _MobileLayout extends StatelessWidget {
         notebooks: state.notebooks,
         selected: state.selectedNotebook,
         onSelect: (nb) { state.selectNotebook(nb); Navigator.pop(context); },
-        onCreate: () async {
-          final name = await _inputDialog(context, 'New Notebook', 'Name');
-          if (name != null) await state.createNotebook(name, '#6366f1');
-        },
+        onCreate: () => _promptCreateNotebook(context),
         onSync: () async {
           await state.triggerSync();
           if (context.mounted) _showSyncResult(context, state);
@@ -177,10 +218,8 @@ class _MobileLayout extends StatelessWidget {
         backgroundColor: const Color(0xFF6366F1),
         foregroundColor: Colors.white,
         onPressed: () async {
-          final note = await state.createNote(title: 'Untitled', noteType: 'typed');
-          final full = await state.getNote(note.id);
-          state.selectNote(full);
-          if (context.mounted) {
+          final full = await _createAndOpenNote(context);
+          if (full != null && context.mounted) {
             Navigator.push(context, MaterialPageRoute(
               builder: (_) => ChangeNotifierProvider.value(
                 value: state,
@@ -193,14 +232,38 @@ class _MobileLayout extends StatelessWidget {
   }
 }
 
-class _NotesHeader extends StatelessWidget {
+class _NotesHeader extends StatefulWidget {
   final String title;
+  final String initialQuery;
   final ValueChanged<String> onSearch;
   final VoidCallback onNewNote;
-  const _NotesHeader({required this.title, required this.onSearch, required this.onNewNote});
+  const _NotesHeader(
+      {required this.title,
+      required this.initialQuery,
+      required this.onSearch,
+      required this.onNewNote});
+
+  @override
+  State<_NotesHeader> createState() => _NotesHeaderState();
+}
+
+class _NotesHeaderState extends State<_NotesHeader> {
+  // Starts from the active query: the list stays filtered across layout
+  // switches, so the field must show what it is filtered by.
+  late final TextEditingController _query =
+      TextEditingController(text: widget.initialQuery);
+
+  @override
+  void dispose() {
+    _query.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
+    final title = widget.title;
+    final onSearch = widget.onSearch;
+    final onNewNote = widget.onNewNote;
     return Padding(padding: const EdgeInsets.all(12), child: Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -208,7 +271,7 @@ class _NotesHeader extends StatelessWidget {
           Expanded(child: Text(title, style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold))),
           IconButton(icon: const Icon(Icons.add, color: Color(0xFF6366F1)), onPressed: onNewNote, tooltip: 'New note'),
         ]),
-        TextField(onChanged: onSearch, decoration: InputDecoration(
+        TextField(controller: _query, onChanged: onSearch, decoration: InputDecoration(
           hintText: 'Search notes...',
           prefixIcon: const Icon(Icons.search, size: 18),
           isDense: true,
@@ -217,6 +280,34 @@ class _NotesHeader extends StatelessWidget {
         )),
       ],
     ));
+  }
+}
+
+class _ActiveSearchBar extends StatelessWidget {
+  final String query;
+  final VoidCallback onClear;
+  const _ActiveSearchBar({required this.query, required this.onClear});
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Theme.of(context).colorScheme.surfaceContainerHighest,
+      child: Padding(
+        padding: const EdgeInsets.only(left: 12),
+        child: Row(children: [
+          const Icon(Icons.search, size: 16),
+          const SizedBox(width: 8),
+          Expanded(
+              child: Text('Filtered by "$query"',
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 12))),
+          IconButton(
+              icon: const Icon(Icons.close, size: 18),
+              tooltip: 'Clear search',
+              onPressed: onClear),
+        ]),
+      ),
+    );
   }
 }
 
@@ -251,10 +342,10 @@ class _EmptyEditor extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Center(child: Column(mainAxisSize: MainAxisSize.min, children: [
-      Icon(Icons.edit_note, size: 64, color: Theme.of(context).colorScheme.onSurface.withOpacity(0.2)),
+      Icon(Icons.edit_note, size: 64, color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.2)),
       const SizedBox(height: 16),
       Text('Select a note or create one',
-        style: TextStyle(color: Theme.of(context).colorScheme.onSurface.withOpacity(0.4))),
+        style: TextStyle(color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.4))),
     ]));
   }
 }

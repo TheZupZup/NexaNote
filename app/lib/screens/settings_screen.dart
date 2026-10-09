@@ -73,6 +73,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Future<void> _loadSettings() async {
     final prefs = await SharedPreferences.getInstance();
+    if (!mounted) return;
     final state = context.read<AppState>();
     setState(() {
       _apiUrlCtrl.text = state.apiUrl;
@@ -146,7 +147,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
     } catch (_) {}
   }
 
-  Future<void> _saveSettings() async {
+  /// Returns false when the backend refused or never got the sync settings.
+  Future<bool> _saveSettings() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('nas_url', _nasUrlCtrl.text.trim());
     await prefs.setString('nas_user', _nasUserCtrl.text.trim());
@@ -156,23 +158,35 @@ class _SettingsScreenState extends State<SettingsScreen> {
     // Push the WebDAV credentials to the backend, which performs the actual
     // sync. In local mode there is no backend to configure — just persist the
     // values locally so they're ready once the user connects one.
+    if (!mounted) return false;
     final state = context.read<AppState>();
     if (state.isBackendConfigured) {
-      await state.client.configureSync(
-        serverUrl: _nasUrlCtrl.text.trim(),
-        username: _nasUserCtrl.text.trim(),
-        password: _nasPassCtrl.text,
-      );
+      try {
+        await state.client.configureSync(
+          serverUrl: _nasUrlCtrl.text.trim(),
+          username: _nasUserCtrl.text.trim(),
+          password: _nasPassCtrl.text,
+        );
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+              content: Text('Could not send sync settings to the backend: $e'),
+              backgroundColor: Colors.red));
+        }
+        return false;
+      }
     }
 
+    if (!mounted) return true;
     setState(() => _isSaved = true);
     Future.delayed(const Duration(seconds: 2), () {
       if (mounted) setState(() => _isSaved = false);
     });
+    return true;
   }
 
   Future<void> _triggerSync() async {
-    await _saveSettings();
+    if (!await _saveSettings() || !mounted) return;
     setState(() {
       _isSyncing = true;
       _syncMessage = null;
@@ -284,7 +298,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           const SizedBox(height: 24),
 
           // ── Stats ──────────────────────────────────────────────
-          _SectionTitle(icon: Icons.bar_chart, title: 'Storage'),
+          const _SectionTitle(icon: Icons.bar_chart, title: 'Storage'),
           Card(
             child: Padding(
               padding: const EdgeInsets.all(16),
@@ -303,7 +317,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           const SizedBox(height: 24),
 
           // ── Sync NAS WebDAV ────────────────────────────────────
-          _SectionTitle(icon: Icons.sync, title: 'WebDAV Sync — NAS'),
+          const _SectionTitle(icon: Icons.sync, title: 'WebDAV Sync — NAS'),
 
           Card(
             child: Padding(
@@ -359,7 +373,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         ? 'Available once a backend is configured'
                         : 'Sync automatically in background'),
                     value: _autoSync && !localMode,
-                    activeColor: const Color(0xFF6366F1),
+                    activeThumbColor: const Color(0xFF6366F1),
                     onChanged: localMode
                         ? null
                         : (v) {
@@ -412,9 +426,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     Container(
                       padding: const EdgeInsets.all(10),
                       decoration: BoxDecoration(
-                        color: _syncColor.withOpacity(0.1),
+                        color: _syncColor.withValues(alpha: 0.1),
                         borderRadius: BorderRadius.circular(8),
-                        border: Border.all(color: _syncColor.withOpacity(0.3)),
+                        border: Border.all(color: _syncColor.withValues(alpha: 0.3)),
                       ),
                       child: Row(
                         children: [
@@ -466,7 +480,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         style: TextStyle(
                             fontSize: 12,
                             fontWeight: FontWeight.w600,
-                            color: scheme.onSurface.withOpacity(0.5))),
+                            color: scheme.onSurface.withValues(alpha: 0.5))),
                     const SizedBox(height: 6),
                     Row(
                       children: [
@@ -498,7 +512,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           const SizedBox(height: 24),
 
           // ── Dossier de notes ───────────────────────────────────
-          _SectionTitle(icon: Icons.folder_outlined, title: 'Dossier de notes'),
+          const _SectionTitle(icon: Icons.folder_outlined, title: 'Dossier de notes'),
           Card(
             child: Padding(
               padding: const EdgeInsets.all(16),
@@ -508,14 +522,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   // Dossier actuel (lu depuis l'API)
                   if (_storageInfo['data_dir'] != null) ...[
                     Row(children: [
-                      Icon(Icons.folder, size: 16, color: const Color(0xFF6366F1)),
+                      const Icon(Icons.folder, size: 16, color: Color(0xFF6366F1)),
                       const SizedBox(width: 8),
                       Expanded(
                         child: Text(
                           'Actuel : ${_storageInfo['data_dir']}',
                           style: TextStyle(
                             fontSize: 12,
-                            color: Theme.of(context).colorScheme.onSurface.withOpacity(0.6),
+                            color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.6),
                             fontFamily: 'monospace',
                           ),
                           // Wrap long paths onto a second line (then ellipsize)
@@ -530,7 +544,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           '${_storageInfo['db_size_mb']} MB',
                           style: TextStyle(
                             fontSize: 11,
-                            color: Theme.of(context).colorScheme.onSurface.withOpacity(0.4),
+                            color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.4),
                           ),
                         ),
                     ]),
@@ -552,7 +566,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   Container(
                     padding: const EdgeInsets.all(10),
                     decoration: BoxDecoration(
-                      color: const Color(0xFF6366F1).withOpacity(0.08),
+                      color: const Color(0xFF6366F1).withValues(alpha: 0.08),
                       borderRadius: BorderRadius.circular(8),
                     ),
                     child: Row(children: [
@@ -563,7 +577,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           'Le changement sera pris en compte au prochain démarrage via nexanote.sh',
                           style: TextStyle(
                             fontSize: 11,
-                            color: Theme.of(context).colorScheme.onSurface.withOpacity(0.6),
+                            color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.6),
                           ),
                         ),
                       ),
@@ -593,7 +607,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           const SizedBox(height: 24),
 
           // ── Backend API (optional) ─────────────────────────────
-          _SectionTitle(icon: Icons.api, title: 'Backend API (optional)'),
+          const _SectionTitle(icon: Icons.api, title: 'Backend API (optional)'),
           Card(
             child: Padding(
               padding: const EdgeInsets.all(16),
@@ -608,7 +622,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         : 'Connect a NexaNote backend for WebDAV/NAS sync.',
                     style: TextStyle(
                         fontSize: 12,
-                        color: scheme.onSurface.withOpacity(0.6)),
+                        color: scheme.onSurface.withValues(alpha: 0.6)),
                   ),
                   const SizedBox(height: 12),
                   TextField(
@@ -643,7 +657,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           return;
                         }
                         await context.read<AppState>().connect(url: url);
-                        if (mounted) {
+                        if (context.mounted) {
                           ScaffoldMessenger.of(context).showSnackBar(
                             const SnackBar(content: Text('Reconnecting...')),
                           );
@@ -659,7 +673,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           const SizedBox(height: 24),
 
           // ── About ──────────────────────────────────────────────
-          _SectionTitle(icon: Icons.info_outline, title: 'About'),
+          const _SectionTitle(icon: Icons.info_outline, title: 'About'),
           Card(
             child: Column(
               children: [
@@ -688,10 +702,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   trailing: const Icon(Icons.open_in_new, size: 16),
                   onTap: () {},
                 ),
-                ListTile(
-                  leading: const Icon(Icons.balance, size: 20),
-                  title: const Text('License'),
-                  subtitle: const Text('MPL 2.0'),
+                const ListTile(
+                  leading: Icon(Icons.balance, size: 20),
+                  title: Text('License'),
+                  subtitle: Text('MPL 2.0'),
                 ),
               ],
             ),
@@ -747,7 +761,7 @@ class _ModeCard extends StatelessWidget {
                   Text(subtitle,
                       style: TextStyle(
                           fontSize: 12,
-                          color: scheme.onSurface.withOpacity(0.6))),
+                          color: scheme.onSurface.withValues(alpha: 0.6))),
                 ],
               ),
             ),
@@ -770,7 +784,7 @@ class _SectionTitle extends StatelessWidget {
       child: Row(
         children: [
           Icon(icon, size: 16,
-              color: Theme.of(context).colorScheme.onSurface.withOpacity(0.5)),
+              color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.5)),
           const SizedBox(width: 6),
           Text(title.toUpperCase(),
               style: TextStyle(
@@ -780,7 +794,7 @@ class _SectionTitle extends StatelessWidget {
                   color: Theme.of(context)
                       .colorScheme
                       .onSurface
-                      .withOpacity(0.5))),
+                      .withValues(alpha: 0.5))),
         ],
       ),
     );
@@ -794,7 +808,12 @@ class _StatChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Column(
+    // Four chips share one row; on a 320px phone (or with large counts) they
+    // shrink to fit instead of overflowing the card.
+    return Expanded(
+      child: FittedBox(
+        fit: BoxFit.scaleDown,
+        child: Column(
       children: [
         Text(value,
             style: const TextStyle(
@@ -807,8 +826,10 @@ class _StatChip extends StatelessWidget {
                 color: Theme.of(context)
                     .colorScheme
                     .onSurface
-                    .withOpacity(0.5))),
+                    .withValues(alpha: 0.5))),
       ],
+        ),
+      ),
     );
   }
 }
@@ -832,7 +853,7 @@ class _SyncStat extends StatelessWidget {
                 color: Theme.of(context)
                     .colorScheme
                     .onSurface
-                    .withOpacity(0.5))),
+                    .withValues(alpha: 0.5))),
       ],
     );
   }

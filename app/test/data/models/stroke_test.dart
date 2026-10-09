@@ -4,7 +4,7 @@ import 'package:nexanote/data/models/stroke.dart';
 import 'package:nexanote/data/models/point.dart';
 
 void main() {
-  final _ts = DateTime.utc(2024, 6, 1, 9, 0);
+  final ts = DateTime.utc(2024, 6, 1, 9, 0);
 
   group('StrokePoint', () {
     test('fromMap reads all fields', () {
@@ -28,7 +28,7 @@ void main() {
     });
 
     test('toMap includes stroke_id and seq', () {
-      final pt = const StrokePoint(x: 5.0, y: 10.0, pressure: 0.8, timestampMs: 100);
+      const pt = StrokePoint(x: 5.0, y: 10.0, pressure: 0.8, timestampMs: 100);
       final map = pt.toMap('stroke-99', 3);
       expect(map['stroke_id'], 'stroke-99');
       expect(map['seq'], 3);
@@ -50,7 +50,7 @@ void main() {
         color: '#0000ff',
         width: 3.5,
         tool: 'highlighter',
-        createdAt: _ts,
+        createdAt: ts,
         points: points,
       );
 
@@ -64,7 +64,7 @@ void main() {
       expect(restored.color, '#0000ff');
       expect(restored.width, 3.5);
       expect(restored.tool, 'highlighter');
-      expect(restored.createdAt, _ts);
+      expect(restored.createdAt, ts);
       expect(restored.points.length, 2);
     });
 
@@ -72,7 +72,7 @@ void main() {
       final map = <String, dynamic>{
         'id': 'stroke-2',
         'note_id': 'note-1',
-        'created_at': _ts.toIso8601String(),
+        'created_at': ts.toIso8601String(),
       };
       final stroke = Stroke.fromMap(map);
       expect(stroke.color, '#000000');
@@ -84,7 +84,7 @@ void main() {
       final stroke = Stroke(
         id: 'stroke-3',
         noteId: 'note-1',
-        createdAt: _ts,
+        createdAt: ts,
       );
       final updated = stroke.copyWith(color: '#ff0000', width: 5.0);
       expect(updated.id, 'stroke-3');
@@ -97,7 +97,7 @@ void main() {
       final stroke = Stroke(
         id: 'stroke-4',
         noteId: 'note-1',
-        createdAt: _ts,
+        createdAt: ts,
         points: points,
       );
       final map = stroke.toMap();

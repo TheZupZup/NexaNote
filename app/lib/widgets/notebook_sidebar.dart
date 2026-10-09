@@ -122,12 +122,12 @@ class NotebookSidebar extends StatelessWidget {
             size: 20,
             color: selected == null
                 ? const Color(0xFF6366F1)
-                : scheme.onSurface.withOpacity(0.6),
+                : scheme.onSurface.withValues(alpha: 0.6),
           ),
           title: const Text('All Notes', style: TextStyle(fontSize: 14)),
           selected: selected == null,
           selectedColor: const Color(0xFF6366F1),
-          selectedTileColor: const Color(0xFF6366F1).withOpacity(0.08),
+          selectedTileColor: const Color(0xFF6366F1).withValues(alpha: 0.08),
           shape:
               RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
           onTap: () => onSelect(null),
@@ -142,7 +142,7 @@ class NotebookSidebar extends StatelessWidget {
                   style: TextStyle(
                       fontSize: 11,
                       fontWeight: FontWeight.w600,
-                      color: scheme.onSurface.withOpacity(0.4),
+                      color: scheme.onSurface.withValues(alpha: 0.4),
                       letterSpacing: 0.8)),
               const Spacer(),
               IconButton(
@@ -189,7 +189,7 @@ class NotebookSidebar extends StatelessWidget {
                 selected: isSelected,
                 selectedColor: const Color(0xFF6366F1),
                 selectedTileColor:
-                    const Color(0xFF6366F1).withOpacity(0.08),
+                    const Color(0xFF6366F1).withValues(alpha: 0.08),
                 shape: RoundedRectangleBorder(
                     borderRadius: BorderRadius.circular(8)),
                 onTap: () => onSelect(nb),
@@ -204,11 +204,11 @@ class NotebookSidebar extends StatelessWidget {
         ListTile(
           dense: true,
           leading: Icon(Icons.settings_outlined,
-              size: 18, color: scheme.onSurface.withOpacity(0.5)),
+              size: 18, color: scheme.onSurface.withValues(alpha: 0.5)),
           title: Text('Settings',
               style: TextStyle(
                   fontSize: 13,
-                  color: scheme.onSurface.withOpacity(0.6))),
+                  color: scheme.onSurface.withValues(alpha: 0.6))),
           onTap: () => Navigator.push(
             context,
             MaterialPageRoute(builder: (_) => const SettingsScreen()),

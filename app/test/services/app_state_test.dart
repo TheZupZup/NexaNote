@@ -1,6 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:sqflite/sqflite.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 import 'package:nexanote/data/database/schema.dart';
@@ -10,11 +11,9 @@ import 'package:nexanote/services/local_note_service.dart';
 import 'package:nexanote/services/sync_service.dart';
 
 class _StubApi extends api.ApiClient {
-  _StubApi({bool shouldThrow = false, this.pingResult = true})
-      : shouldThrow = shouldThrow,
-        super(baseUrl: 'http://stub.test');
+  _StubApi({this.shouldThrow = false}) : super(baseUrl: 'http://stub.test');
   bool shouldThrow;
-  final bool pingResult;
+  final bool pingResult = true;
   int createNoteCalls = 0;
 
   @override
@@ -60,6 +59,35 @@ class _StubApi extends api.ApiClient {
       updatedAt: '',
       createdAt: '',
     );
+  }
+}
+
+/// Backend that is reachable but fails the first note upload, as a dropped
+/// connection mid-migration would.
+class _FlakyUploadApi extends _StubApi {
+  int failuresLeft = 1;
+  final savedText = <String, String>{};
+
+  @override
+  Future<api.Note> createNote({
+    required String title,
+    required String noteType,
+    String? notebookId,
+    String template = 'blank',
+  }) {
+    if (failuresLeft > 0) {
+      failuresLeft--;
+      throw Exception('connection reset');
+    }
+    return super.createNote(
+        title: title, noteType: noteType, notebookId: notebookId);
+  }
+
+  @override
+  Future<String?> savePageText(
+      String noteId, int pageNum, String content) async {
+    savedText[noteId] = content;
+    return null;
   }
 }
 
@@ -707,6 +735,56 @@ void main() {
           reason: 'the offline note should be pushed to the backend on switch');
     });
 
+    test('offline notes are uploaded on a later connect if the first upload '
+        'failed', () async {
+      final stub = _FlakyUploadApi();
+      final s = AppState(localService: service, clientFactory: (_) => stub);
+      await s.enableLocalMode();
+      final note = await s.createNote(title: 'Offline note', noteType: 'typed');
+      await s.savePageText(note.id, 1, 'only copy of this text');
+
+      await s.connect(url: 'http://192.0.2.10:8766');
+      expect(s.syncError, contains('Could not upload notes taken offline'));
+      expect(stub.savedText, isEmpty);
+
+      await s.connect();
+      expect(stub.savedText.values, ['only copy of this text']);
+      expect(stub.createNoteCalls, 1);
+
+      await s.connect();
+      expect(stub.createNoteCalls, 1, reason: 'already uploaded, not again');
+    });
+
+    test('a notebook selected offline is not kept under its old local id',
+        () async {
+      final stub = _FlakyUploadApi()..failuresLeft = 0;
+      final s = AppState(localService: service, clientFactory: (_) => stub);
+      await s.enableLocalMode();
+      final nb = await s.createNotebook('Work', '#6366f1');
+      s.selectNotebook(nb);
+
+      await s.connect(url: 'http://192.0.2.10:8766');
+
+      // The upload re-keyed the notebook; the stale local id must not be
+      // used for new notes.
+      expect(s.selectedNotebook?.id, isNot(nb.id));
+    });
+
+    test('two quick connects upload an offline note only once', () async {
+      final stub = _FlakyUploadApi()..failuresLeft = 0;
+      final s = AppState(localService: service, clientFactory: (_) => stub);
+      await s.enableLocalMode();
+      final note = await s.createNote(title: 'Offline', noteType: 'typed');
+      await s.savePageText(note.id, 1, 'body');
+
+      await Future.wait([
+        s.connect(url: 'http://192.0.2.10:8766'),
+        s.connect(url: 'http://192.0.2.10:8766'),
+      ]);
+
+      expect(stub.createNoteCalls, 1);
+    });
+
     test('existing connected users are not reset to onboarding or local mode',
         () async {
       // Simulates an upgrade from a pre-local-mode build: the only persisted
@@ -724,6 +802,62 @@ void main() {
       expect(s.needsOnboarding, isFalse);
       expect(s.isBackendConfigured, isTrue);
       expect(s.apiUrl, 'http://192.0.2.10:8766');
+    });
+  });
+
+  group('HTTP client errors', () {
+    const notesJson =
+        '[{"id":"a","title":"A","note_type":"typed","tags":[],"is_pinned":false,'
+        '"is_deleted":false,"page_count":1,"updated_at":"","created_at":""},'
+        '{"id":"b","title":"B","note_type":"typed","tags":[],"is_pinned":false,'
+        '"is_deleted":false,"page_count":1,"updated_at":"","created_at":""}]';
+
+    AppState backendAnswering(int Function(http.Request) statusFor) {
+      final mock = MockClient((req) async {
+        final path = req.url.path;
+        if (path == '/health') return http.Response('{}', 200);
+        if (path == '/notebooks') return http.Response('[]', 200);
+        if (path == '/notes' && req.method == 'GET') {
+          return http.Response(notesJson, 200);
+        }
+        return http.Response('{"detail":"x"}', statusFor(req));
+      });
+      return AppState(
+          localService: service,
+          clientFactory: (url) => api.ApiClient(baseUrl: url, httpClient: mock));
+    }
+
+    test('deleting a note another device already deleted is not an outage',
+        () async {
+      final s = backendAnswering((_) => 404);
+      await s.connect(url: 'http://srv.test');
+
+      await s.deleteNote('a');
+
+      expect(s.isBackendAvailable, isTrue);
+      expect(s.notes.map((n) => n.id), ['b']);
+    });
+
+    test('a 4xx on a save is reported but keeps the app online', () async {
+      final s = backendAnswering((_) => 422);
+      await s.connect(url: 'http://srv.test');
+
+      await expectLater(
+          s.savePageText('a', 1, 'x'), throwsA(isA<api.ApiException>()));
+
+      expect(s.isBackendAvailable, isTrue);
+      expect(s.backendErrorMessage, isNull);
+      expect(s.notes.map((n) => n.id), ['a', 'b']);
+    });
+
+    test('a 5xx still switches to offline mode', () async {
+      final s = backendAnswering((_) => 503);
+      await s.connect(url: 'http://srv.test');
+
+      await expectLater(
+          s.savePageText('a', 1, 'x'), throwsA(isA<api.ApiException>()));
+
+      expect(s.isBackendAvailable, isFalse);
     });
   });
 }

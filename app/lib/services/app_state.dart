@@ -1,16 +1,18 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 // Aliased so the API DTOs are unambiguous: there are also `Notebook` / `Note`
 // classes in data/models reachable through [LocalNoteService].
 import 'api_client.dart' as api;
+import 'ink_json.dart';
 import 'local_note_service.dart';
 import 'server_url.dart';
 import 'sync_service.dart';
 import '../data/models/note.dart' as local;
 import '../data/models/notebook.dart' as local;
 import '../data/models/stroke.dart';
-import '../data/models/point.dart';
 
 typedef ApiClientFactory = api.ApiClient Function(String baseUrl);
 
@@ -57,7 +59,22 @@ class AppState extends ChangeNotifier {
   String? _backendErrorMessage;
   String? _lastConnectError;
   bool _hasLocalData = false;
+  bool _isStarting = false;
   bool _isLoading = false;
+  String? _searchQuery;
+  int _notesRequest = 0;
+  int _openRequest = 0;
+  Future<void>? _localUpload;
+
+  /// Newest drawing per note not yet in its final storage. `rev` is the
+  /// local ink revision it was recorded as, once it has been.
+  final _stagedInk =
+      <String, ({int ticket, List<Map<String, dynamic>> strokes, int? rev})>{};
+  int _inkTickets = 0;
+  final _knownNotes = <String, api.Note>{};
+  final _runningPushes = <String, Future<void>>{};
+  final _queuedPushes = <String, Future<void>>{};
+  final _pushesStarted = <String, int>{};
   bool _isSyncing = false;
   String? _syncMessage;
   String? _syncError;
@@ -115,7 +132,14 @@ class AppState extends ChangeNotifier {
   String? get backendErrorMessage => _backendErrorMessage;
   String? get lastConnectError => _lastConnectError;
   bool get hasLocalData => _hasLocalData;
+  /// True only while [init] runs at app start; the shell shows the splash.
+  /// Later reloads use [isLoading], which only drives the notes list spinner,
+  /// so they never tear down HomeScreen (search field, open editor).
+  bool get isStarting => _isStarting;
   bool get isLoading => _isLoading;
+
+  /// The active notes search, kept across list reloads ('' or null: none).
+  String get searchQuery => _searchQuery ?? '';
   bool get isSyncing => _isSyncing;
   String? get syncMessage => _syncMessage;
   String? get syncError => _syncError;
@@ -132,6 +156,18 @@ class AppState extends ChangeNotifier {
   LocalNoteService get localService => _localService;
 
   Future<void> init() async {
+    // Set before the first await so the very first frame shows the splash
+    // rather than flashing onboarding while preferences load.
+    _isStarting = true;
+    try {
+      await _init();
+    } finally {
+      _isStarting = false;
+      notifyListeners();
+    }
+  }
+
+  Future<void> _init() async {
     await initLocal();
     final prefs = await SharedPreferences.getInstance();
     _apiUrl = prefs.getString(kPrefsApiUrl) ?? 'http://127.0.0.1:8766';
@@ -214,21 +250,46 @@ class AppState extends ChangeNotifier {
     }
   }
 
-  /// Best-effort upload of notes the user created while offline, run once when
-  /// they leave local mode by connecting a backend. Reuses the existing
-  /// [SyncService] push so the storage/sync layout is unchanged. Failures are
-  /// swallowed: a connection must never be blocked by a migration hiccup — the
-  /// notes stay in the local store and can be synced again later.
-  Future<void> _migrateLocalNotesToBackend() async {
+  /// Uploads notes the user created while offline (local mode). Runs on every
+  /// successful connect, not just the first one after leaving local mode: if
+  /// the upload fails halfway (network drop, backend error), the remaining
+  /// notes are still pending locally and are retried on the next connect.
+  /// Already-uploaded notes are marked synced, so a retry doesn't duplicate
+  /// them. A failure never blocks the connection, but it is reported through
+  /// [syncError] instead of being dropped silently.
+  Future<void> _uploadPendingLocalNotes() =>
+      // One upload at a time: two quick Reconnects would otherwise both see
+      // the same pending notes and create each of them twice on the server.
+      _localUpload ??=
+          _uploadPendingLocalNotesOnce().whenComplete(() => _localUpload = null);
+
+  Future<void> _uploadPendingLocalNotesOnce() async {
     try {
       final snapshot = await _localService.exportAllData();
-      final hasLocal = snapshot.notebooks.isNotEmpty ||
-          snapshot.notes.any((n) => !n.isDeleted);
-      if (!hasLocal) return;
+      final pending = snapshot.notebooks.any((n) => n.syncStatus != 'synced') ||
+          snapshot.notes.any((n) => n.syncStatus != 'synced');
+      if (!pending) return;
       final svc = SyncService(apiClient: client, local: _localService);
       await svc.pushLocal();
+    } catch (e) {
+      _syncError = 'Could not upload notes taken offline: ${_safeErrorString(e)}';
+    }
+  }
+
+  /// Sends edits recorded on this device that the backend never confirmed
+  /// (the app was closed, killed or offline before they got through). A
+  /// failure is reported through [syncError]; the edits stay pending.
+  Future<void> _pushEditsSavedOnDevice() async {
+    try {
+      await _ensureLocalReady();
     } catch (_) {
-      // Intentionally ignored — see doc comment.
+      return; // no local store, so nothing can be pending in it
+    }
+    try {
+      await _pushAllPending();
+    } catch (e) {
+      _syncError =
+          'Could not upload edits saved on this device: ${_safeErrorString(e)}';
     }
   }
 
@@ -257,16 +318,24 @@ class AppState extends ChangeNotifier {
       _backendErrorMessage = null;
       // A reachable backend means one is now configured — drop out of local
       // mode so CRUD and sync use the backend again.
-      final wasLocalMode = _localMode;
       await _clearLocalMode();
       await _markEverConnected();
       try {
-        if (wasLocalMode) {
-          // The user took notes offline before configuring a server — upload
-          // them so nothing created in local mode is lost on the switch.
-          await _migrateLocalNotesToBackend();
-        }
+        // Notes taken offline before (or while) a server was configured are
+        // uploaded so nothing created in local mode is lost on the switch.
+        // Edits saved on this device first: one made on a note whose
+        // content was never downloaded becomes a note of its own, which
+        // the upload right after then sends.
+        await _pushEditsSavedOnDevice();
+        await _uploadPendingLocalNotes();
         await loadNotebooks();
+        // The upload re-keys notebooks to their server ids, and a notebook
+        // may be gone on this server: don't keep filing new notes under an
+        // id the backend doesn't know.
+        if (_selectedNotebook != null &&
+            !_notebooks.any((nb) => nb.id == _selectedNotebook!.id)) {
+          _selectedNotebook = null;
+        }
         await loadNotes();
       } catch (e) {
         _isBackendAvailable = false;
@@ -309,6 +378,9 @@ class AppState extends ChangeNotifier {
     _isBackendAvailable = true;
     _isConnected = true;
     _backendErrorMessage = null;
+    // Back online: send what was saved on this device meanwhile, also for
+    // notes whose editor is closed and gave up retrying.
+    unawaited(_pushEditsSavedOnDevice());
     return true;
   }
 
@@ -345,7 +417,8 @@ class AppState extends ChangeNotifier {
   /// Reloads [_notes] from the local SQLite store, applying the same
   /// notebook/search filters the backend would. Used by the local-mode CRUD
   /// paths so list views stay in sync with on-device data.
-  Future<void> _refreshLocalNotes({String? notebookId, String? search}) async {
+  Future<List<api.Note>> _queryLocalNotes(
+      {String? notebookId, String? search}) async {
     await _ensureLocalReady();
     final snapshot = await _localService.exportAllData();
     Iterable<local.Note> notes = snapshot.notes.where((n) => !n.isDeleted);
@@ -356,8 +429,7 @@ class AppState extends ChangeNotifier {
     if (query != null && query.isNotEmpty) {
       notes = notes.where((n) => n.title.toLowerCase().contains(query));
     }
-    _notes = notes.map(_toApiNote).toList();
-    _hasLocalData = _notebooks.isNotEmpty || _notes.isNotEmpty;
+    return notes.map(_toApiNote).toList();
   }
 
   api.Notebook _toApiNotebook(local.Notebook n) => api.Notebook(
@@ -388,9 +460,10 @@ class AppState extends ChangeNotifier {
   api.Note _toApiNoteWithContent(
     local.Note n, {
     List<Stroke> strokes = const [],
+    String? id,
   }) =>
       api.Note(
-        id: n.id,
+        id: id ?? n.id,
         title: n.title,
         noteType: n.noteType,
         notebookId: n.notebookId,
@@ -431,14 +504,14 @@ class AppState extends ChangeNotifier {
       await _ensureLocalReady();
       final nb = await _localService.createNotebook(name, color: color);
       final apiNb = _toApiNotebook(nb);
-      _notebooks.insert(0, apiNb);
+      _notebooks = [apiNb, ..._notebooks];
       _hasLocalData = true;
       notifyListeners();
       return apiNb;
     }
     try {
       final nb = await client.createNotebook(name: name, color: color);
-      _notebooks.insert(0, nb);
+      _notebooks = [nb, ..._notebooks];
       _markBackendAvailable();
       notifyListeners();
       return nb;
@@ -452,14 +525,14 @@ class AppState extends ChangeNotifier {
     if (_localMode) {
       await _ensureLocalReady();
       await _localService.hardDeleteNotebook(id);
-      _notebooks.removeWhere((n) => n.id == id);
+      _notebooks = [..._notebooks.where((n) => n.id != id)];
       if (_selectedNotebook?.id == id) { _selectedNotebook = null; _notes = []; }
       notifyListeners();
       return;
     }
     try {
       await client.deleteNotebook(id);
-      _notebooks.removeWhere((n) => n.id == id);
+      _notebooks = [..._notebooks.where((n) => n.id != id)];
       if (_selectedNotebook?.id == id) { _selectedNotebook = null; _notes = []; }
       _markBackendAvailable();
       notifyListeners();
@@ -475,19 +548,35 @@ class AppState extends ChangeNotifier {
     loadNotes(notebookId: nb?.id);
   }
 
+  /// Reloads the notes list. [search] replaces the active search query when
+  /// given; otherwise the current one is kept, so a reload triggered by a
+  /// rename or a notebook switch doesn't silently drop the user's filter.
+  ///
+  /// Only the latest call may publish its result: with a slow backend, the
+  /// results for "gr" could otherwise arrive after those for "groc".
   Future<void> loadNotes({String? notebookId, String? search}) async {
+    if (search != null) _searchQuery = search;
+    final query = _searchQuery;
+    final request = ++_notesRequest;
     _isLoading = true;
     notifyListeners();
     if (_localMode) {
-      await _refreshLocalNotes(notebookId: notebookId, search: search);
+      final notes =
+          await _queryLocalNotes(notebookId: notebookId, search: query);
+      if (request != _notesRequest) return;
+      _notes = notes;
+      _hasLocalData = _notebooks.isNotEmpty || _notes.isNotEmpty;
       _isLoading = false;
       notifyListeners();
       return;
     }
     try {
-      _notes = await client.getNotes(notebookId: notebookId, search: search);
+      final notes = await client.getNotes(notebookId: notebookId, search: query);
+      if (request != _notesRequest) return;
+      _notes = notes;
       _markBackendAvailable();
     } catch (e) {
+      if (request != _notesRequest) return;
       await _handleBackendFailure(e);
     }
     _isLoading = false;
@@ -503,7 +592,7 @@ class AppState extends ChangeNotifier {
         noteType: noteType,
       );
       final apiNote = _toApiNote(note);
-      _notes.insert(0, apiNote);
+      _notes = [apiNote, ..._notes];
       _hasLocalData = true;
       notifyListeners();
       return apiNote;
@@ -512,7 +601,7 @@ class AppState extends ChangeNotifier {
       final note = await client.createNote(
         title: title, noteType: noteType,
         notebookId: _selectedNotebook?.id, template: template);
-      _notes.insert(0, note);
+      _notes = [note, ..._notes];
       _markBackendAvailable();
       notifyListeners();
       return note;
@@ -526,6 +615,11 @@ class AppState extends ChangeNotifier {
   /// from the backend when connected, or from the local SQLite store in local
   /// mode. Screens call this instead of `client.getNote` directly so the
   /// editor opens offline.
+  ///
+  /// Connected, the server copy is cached locally, and parts with a local
+  /// edit the server hasn't confirmed yet (for instance saved just before
+  /// the app was killed) are shown in their local version. When the backend
+  /// can't be reached the local copy is returned, if there is one.
   Future<api.Note> getNote(String id) async {
     if (_localMode) {
       await _ensureLocalReady();
@@ -536,21 +630,54 @@ class AppState extends ChangeNotifier {
       final strokes = await _localService.getStrokesForNote(id);
       return _toApiNoteWithContent(n, strokes: strokes);
     }
-    return client.getNote(id);
+    final before = await _pushState(id);
+    final api.Note remote;
+    try {
+      remote = await client.getNote(id);
+    } catch (e) {
+      if (_isClientError(e)) rethrow;
+      final cached = await _localCopyOf(id);
+      if (cached == null) rethrow;
+      await _handleBackendFailure(e);
+      return cached;
+    }
+    // A push of this note that ran while the server answered may have
+    // landed after the copy we got was read: it can't replace ours then.
+    final after = await _pushState(id);
+    final raced = before != null &&
+        (before.running || after == null || after.started != before.started);
+    return _withLocalEdits(remote, serverMayBeBehind: raced);
+  }
+
+  Future<({bool running, int started})?> _pushState(String id) async {
+    try {
+      await _ensureLocalReady();
+      final localId = await _localService.localIdForRemote(id);
+      if (localId == null) return null;
+      return (
+        running: _runningPushes.containsKey(localId),
+        started: _pushesStarted[localId] ?? 0,
+      );
+    } catch (_) {
+      return null;
+    }
   }
 
   Future<void> deleteNote(String id) async {
     if (_localMode) {
       await _ensureLocalReady();
       await _localService.deleteNote(id);
-      _notes.removeWhere((n) => n.id == id);
+      _notes = [..._notes.where((n) => n.id != id)];
       if (_selectedNote?.id == id) _selectedNote = null;
       notifyListeners();
       return;
     }
+    // Found before the delete: a push failing on the deleted note may
+    // unlink the row from it meanwhile.
+    final localId = await _localIdOrNull(id);
     try {
       await client.deleteNote(id);
-      _notes.removeWhere((n) => n.id == id);
+      _notes = [..._notes.where((n) => n.id != id)];
       if (_selectedNote?.id == id) _selectedNote = null;
       _markBackendAvailable();
       notifyListeners();
@@ -558,103 +685,480 @@ class AppState extends ChangeNotifier {
       await _handleBackendFailure(e);
       rethrow;
     }
+    await _dropLocalCopy(id, localId);
   }
 
+  /// Saves the note's title: durably on this device first, then to the
+  /// backend when one is configured. Throws when the backend save fails; the
+  /// title is still kept locally and sent on a later [pushPending].
   Future<void> updateNoteTitle(String id, String title) async {
-    if (_localMode) {
-      await _ensureLocalReady();
-      final n = await _localService.getNoteById(id);
-      if (n != null) {
-        await _localService.upsertNote(n.copyWith(
-          title: title,
-          syncStatus: n.syncStatus == 'synced' ? 'modified' : n.syncStatus,
-          updatedAt: DateTime.now().toUtc(),
-        ));
-      }
-      await loadNotes(notebookId: _selectedNotebook?.id);
-      return;
-    }
-    try {
-      await client.updateNote(id, title: title);
-      _markBackendAvailable();
-      await loadNotes(notebookId: _selectedNotebook?.id);
-    } catch (e) {
-      await _handleBackendFailure(e);
-      rethrow;
-    }
+    await recordTitle(id, title);
+    await pushPending(id);
   }
 
+  /// Saves page text like [updateNoteTitle] does the title.
   Future<void> savePageText(String noteId, int pageNum, String content) async {
-    if (_localMode) {
-      await _ensureLocalReady();
-      final n = await _localService.getNoteById(noteId);
-      if (n != null) {
-        await _localService.upsertNote(n.copyWith(
-          typedContent: content,
-          syncStatus: n.syncStatus == 'synced' ? 'modified' : n.syncStatus,
-          updatedAt: DateTime.now().toUtc(),
-        ));
-      }
-      return;
-    }
-    try {
-      await client.savePageText(noteId, pageNum, content);
-      if (_markBackendAvailable()) notifyListeners();
-    } catch (e) {
-      await _handleBackendFailure(e);
-      rethrow;
-    }
+    await recordText(noteId, content);
+    await pushPending(noteId);
   }
 
-  /// Persists a page's ink [strokes], honouring the current mode. In local mode
-  /// the drawing is written to the on-device SQLite store (replacing the note's
-  /// previous strokes) and the note is flagged for later sync; with a backend
-  /// configured it goes through the existing API. Throws on failure so the
-  /// editor can surface a friendly error rather than silently dropping a
-  /// drawing.
-  ///
+  /// Saves a page's ink [strokes] like [updateNoteTitle] does the title.
   /// [strokes] is the editor's wire shape (`{id,color,width,tool,points:[…]}`),
-  /// the same payload the backend already accepts.
+  /// the same payload the backend already accepts. See [recordInk] for
+  /// [ticket].
   Future<void> savePageInk(
     String noteId,
     int pageNum,
-    List<Map<String, dynamic>> strokes,
-  ) async {
+    List<Map<String, dynamic>> strokes, {
+    int? ticket,
+  }) async {
+    await recordInk(noteId, strokes, ticket: ticket);
+    await pushPending(noteId);
+  }
+
+  /// Records [title] as the note's newest title in the local store, without
+  /// waiting for the network. In local mode that is the only copy; with a
+  /// backend it is the durable copy until [pushPending] gets it there.
+  Future<void> recordTitle(String noteId, String title) async {
     if (_localMode) {
       await _ensureLocalReady();
-      // A single created-at instant per save, nudged forward per stroke so the
-      // load order matches the draw order (getStrokesForNote sorts by it).
-      final base = DateTime.now().toUtc();
-      final localStrokes = <Stroke>[
-        for (var i = 0; i < strokes.length; i++)
-          strokeFromInkJson(
-            noteId,
-            strokes[i],
-            base.add(Duration(milliseconds: i)),
-          ),
-      ];
-      await _localService.replaceStrokesForNote(noteId, localStrokes);
-      // Mark the note modified so a future sync uploads the drawing. The
-      // note's content/type is untouched — only the sync bookkeeping changes.
-      final n = await _localService.getNoteById(noteId);
-      if (n != null) {
-        await _localService.upsertNote(n.copyWith(
-          syncStatus: n.syncStatus == 'synced' ? 'modified' : n.syncStatus,
-          updatedAt: DateTime.now().toUtc(),
-        ));
-      }
+      await _localService.updateNoteTitle(noteId, title);
+      await loadNotes(notebookId: _selectedNotebook?.id);
       return;
     }
-    try {
-      await client.savePageInk(noteId, pageNum, strokes);
-      if (_markBackendAvailable()) notifyListeners();
-    } catch (e) {
-      await _handleBackendFailure(e);
-      rethrow;
+    await _recordConnected(
+      noteId,
+      (localId) => _localService.updateNoteTitle(localId, title),
+      orSend: () => client.updateNote(noteId, title: title),
+    );
+    _notes = [
+      for (final n in _notes) n.id == noteId ? n.copyWith(title: title) : n,
+    ];
+    notifyListeners();
+  }
+
+  /// Records [content] as the note's newest text; see [recordTitle].
+  Future<void> recordText(String noteId, String content) async {
+    if (_localMode) {
+      await _ensureLocalReady();
+      await _localService.updateNoteContent(noteId, content, blind: true);
+      return;
+    }
+    await _recordConnected(
+      noteId,
+      (localId) => _localService.updateNoteContent(localId, content),
+      orSend: () => client.savePageText(noteId, 1, content),
+    );
+  }
+
+  /// Records [strokes] as the note's newest drawing; see [recordTitle].
+  ///
+  /// With a [ticket] from [stageInk], nothing is written when a newer
+  /// drawing of the same note has been staged since: retries of an older
+  /// snapshot (for instance from an editor that was closed) can never land
+  /// after a newer one.
+  Future<void> recordInk(
+    String noteId,
+    List<Map<String, dynamic>> strokes, {
+    int? ticket,
+  }) async {
+    if (ticket != null && _stagedInk[noteId]?.ticket != ticket) return;
+    // A single created-at instant per save, nudged forward per stroke so the
+    // load order matches the draw order (getStrokesForNote sorts by it).
+    final base = DateTime.now().toUtc();
+    List<Stroke> toLocal(String localId) => [
+          for (var i = 0; i < strokes.length; i++)
+            strokeFromInkJson(
+                localId, strokes[i], base.add(Duration(milliseconds: i))),
+        ];
+    // Checked again right before the write: a newer drawing may have been
+    // staged while this one waited for the store.
+    bool superseded() =>
+        ticket != null && _stagedInk[noteId]?.ticket != ticket;
+    if (_localMode) {
+      await _ensureLocalReady();
+      if (superseded()) return;
+      await _localService.recordInk(noteId, toLocal(noteId), blind: true);
+      _unstageInk(noteId, ticket);
+      return;
+    }
+    int? rev;
+    final local = await _recordConnected(
+      noteId,
+      (localId) async {
+        if (superseded()) return 1;
+        rev = await _localService.recordInk(localId, toLocal(localId));
+        return rev == null ? 0 : 1;
+      },
+      orSend: () => client.savePageInk(noteId, 1, strokes),
+    );
+    final staged = _stagedInk[noteId];
+    if (staged == null || ticket == null || staged.ticket != ticket) return;
+    if (!local) {
+      _stagedInk.remove(noteId); // sent straight to the backend
+    } else {
+      // Stays staged until the backend has this revision.
+      _stagedInk[noteId] = (ticket: ticket, strokes: strokes, rev: rev);
     }
   }
 
+  /// Records [strokes] as the newest drawing of [noteId] until it is saved,
+  /// and returns the ticket to pass to [recordInk].
+  int stageInk(String noteId, List<Map<String, dynamic>> strokes) {
+    final ticket = ++_inkTickets;
+    _stagedInk[noteId] = (ticket: ticket, strokes: strokes, rev: null);
+    return ticket;
+  }
+
+  /// The newest drawing of [noteId] that has not reached its final storage
+  /// yet (the backend when one is configured), if any. A reopened editor
+  /// starts from it rather than from the older copy it was opened with.
+  List<Map<String, dynamic>>? unsavedInk(String noteId) =>
+      _stagedInk[noteId]?.strokes;
+
+  void _unstageInk(String noteId, int? ticket) {
+    if (ticket != null && _stagedInk[noteId]?.ticket == ticket) {
+      _stagedInk.remove(noteId);
+    }
+  }
+
+  /// Remembers [note] as the latest known server copy, used to fill in the
+  /// local copy if an edit to it is recorded before [getNote] cached it.
+  void rememberNote(api.Note note) {
+    if (_localMode || _knownNotes.containsKey(note.id)) return;
+    // Only needed until the note's local copy exists; keep a few at most.
+    if (_knownNotes.length >= 16) _knownNotes.remove(_knownNotes.keys.first);
+    _knownNotes[note.id] = note;
+  }
+
+  /// Sends the edits of [noteId] recorded locally that the backend hasn't
+  /// confirmed yet. No-op in local mode or when nothing is pending.
+  ///
+  /// Each push reads the newest local version when it starts, and a part
+  /// is only marked synced up to the revision that was sent, so an edit
+  /// made meanwhile stays pending. One push per note at a time; requests
+  /// made while one runs share a single follow-up push. Throws when the
+  /// backend can't be reached or refuses the save.
+  Future<void> pushPending(String noteId) async {
+    if (_localMode) return;
+    final String? localId;
+    try {
+      await _ensureLocalReady();
+      localId = await _localService.localIdForRemote(noteId);
+    } catch (e) {
+      debugPrint('No local store to push from: $e');
+      return;
+    }
+    if (localId == null) return;
+    await _push(localId);
+  }
+
+  Future<void> _push(String localId) {
+    final queued = _queuedPushes[localId];
+    if (queued != null) return queued;
+    final running = _runningPushes[localId];
+    if (running == null) return _startPush(localId);
+    final next = running.then((_) {}, onError: (_) {}).then((_) {
+      _queuedPushes.remove(localId);
+      return _startPush(localId);
+    });
+    _queuedPushes[localId] = next;
+    return next;
+  }
+
+  Future<void> _startPush(String localId) {
+    _pushesStarted[localId] = (_pushesStarted[localId] ?? 0) + 1;
+    late final Future<void> push;
+    push = _pushOnce(localId).whenComplete(() {
+      if (identical(_runningPushes[localId], push)) {
+        _runningPushes.remove(localId);
+      }
+    });
+    _runningPushes[localId] = push;
+    return push;
+  }
+
+  Future<void> _pushOnce(String localId) async {
+    var note = await _localService.getNoteById(localId);
+    if (note != null && note.blindEdit) {
+      // Text or ink typed over a note whose content this device never had
+      // would wipe the server's: they go to a note of their own instead.
+      if (await _localService.splitOffContentlessEdits(localId)) {
+        note = await _localService.getNoteById(localId);
+      }
+    }
+    final remoteId = note?.remoteId;
+    if (note == null ||
+        remoteId == null ||
+        note.syncStatus == 'local_only' ||
+        !note.hasPendingEdits) {
+      return;
+    }
+    final pushed = note;
+    // Each part on its own: one the server refuses (say a 413 for a huge
+    // text) doesn't keep the others from going through.
+    Object? failure;
+    Future<void> part(Future<void> Function() send) async {
+      if (failure is api.ApiException &&
+          (failure as api.ApiException).statusCode == 404) {
+        return;
+      }
+      try {
+        await send();
+      } catch (e) {
+        failure ??= e;
+      }
+    }
+
+    var titleSent = false;
+    if (pushed.titlePending) {
+      await part(() async {
+        await client.updateNote(remoteId, title: pushed.title);
+        await _localService.markPartSynced(
+            localId, local.NotePart.title, pushed.titleRev);
+        titleSent = true;
+      });
+    }
+    if (pushed.textPending) {
+      await part(() async {
+        await client.savePageText(remoteId, 1, pushed.typedContent);
+        await _localService.markPartSynced(
+            localId, local.NotePart.text, pushed.textRev);
+      });
+    }
+    if (pushed.inkPending) {
+      await part(() async {
+        final ink = await _localService.readInk(localId);
+        if (ink == null) return;
+        await client.savePageInk(
+            remoteId, 1, ink.strokes.map(inkJsonFromStroke).toList());
+        await _localService.markPartSynced(
+            localId, local.NotePart.ink, ink.rev);
+        // The editor stages by the id it opened the note with.
+        for (final key in {remoteId, localId}) {
+          final stagedRev = _stagedInk[key]?.rev;
+          if (stagedRev != null && stagedRev <= ink.rev) {
+            _stagedInk.remove(key);
+          }
+        }
+      });
+    }
+    final error = failure;
+    if (error != null) {
+      if (error is api.ApiException && error.statusCode == 404) {
+        // Deleted on the server meanwhile: keep the edits as a note of its
+        // own, uploaded like one taken offline, rather than retrying into
+        // a note that is gone.
+        await _localService.detachFromRemote(localId);
+        _stagedInk.remove(remoteId);
+        _stagedInk.remove(localId);
+      }
+      await _handleBackendFailure(error);
+      if (titleSent) await loadNotes(notebookId: _selectedNotebook?.id);
+      throw error;
+    }
+    if (_markBackendAvailable()) notifyListeners();
+    if (titleSent) await loadNotes(notebookId: _selectedNotebook?.id);
+  }
+
+  /// Pushes every note with edits recorded locally that the backend hasn't
+  /// confirmed, for instance from before the app was closed or killed. One
+  /// note failing doesn't stop the others; the first error is rethrown at
+  /// the end.
+  Future<void> _pushAllPending() async {
+    final pending = await _localService.getNotesWithPendingEdits();
+    Object? firstError;
+    for (final note in pending) {
+      try {
+        await _push(note.id);
+      } catch (e) {
+        firstError ??= e;
+      }
+    }
+    if (firstError != null) throw firstError;
+  }
+
+  /// Runs [record] against the local copy of server note [noteId], creating
+  /// that copy if needed. Returns false when there is no local store (it
+  /// can't be opened on this platform or device) and the edit went straight
+  /// to the backend through [orSend] instead. A local write that fails on a
+  /// working store is rethrown, never sent around it: an older edit still
+  /// pending locally would otherwise be pushed after this newer one.
+  Future<bool> _recordConnected(
+    String noteId,
+    Future<int> Function(String localId) record, {
+    required Future<Object?> Function() orSend,
+  }) async {
+    try {
+      await _ensureLocalReady();
+    } catch (e) {
+      debugPrint('Local store unavailable, saving to the backend only: $e');
+      try {
+        await orSend();
+        if (_markBackendAvailable()) notifyListeners();
+      } catch (e) {
+        await _handleBackendFailure(e);
+        rethrow;
+      }
+      return false;
+    }
+    // A pull may remove a synced copy between finding it and writing to
+    // it; the second round recreates it.
+    for (var attempt = 0; attempt < 2; attempt++) {
+      final localId = await _localService.cacheRemoteNote(
+        _mirrorOf(_knownNote(noteId), noteId),
+        _strokesOf(_knownNote(noteId), noteId),
+        refresh: false,
+      );
+      if (await record(localId) > 0) {
+        _knownNotes.remove(noteId);
+        return true;
+      }
+    }
+    throw StateError('Could not record the edit of note $noteId locally');
+  }
+
+  api.Note? _knownNote(String id) {
+    if (_selectedNote?.id == id) return _selectedNote;
+    return _knownNotes[id] ?? _notes.where((n) => n.id == id).firstOrNull;
+  }
+
+  /// The local row for server note [n] (or a bare one for [id] when nothing
+  /// is known about it), as a synced copy of the server version.
+  local.Note _mirrorOf(api.Note? n, String id) {
+    final now = DateTime.now().toUtc();
+    DateTime parse(String? iso) =>
+        (iso == null ? null : DateTime.tryParse(iso))?.toUtc() ?? now;
+    final page = n?.pages?.where((p) => p.pageNumber == 1).firstOrNull;
+    return local.Note(
+      id: id,
+      remoteId: id,
+      notebookId: n?.notebookId,
+      title: n?.title ?? '',
+      noteType: n?.noteType ?? 'typed',
+      tags: n?.tags ?? const [],
+      isPinned: n?.isPinned ?? false,
+      typedContent: page?.typedContent ?? '',
+      syncStatus: 'synced',
+      hasContent: n?.pages != null,
+      createdAt: parse(n?.createdAt),
+      updatedAt: parse(n?.updatedAt),
+    );
+  }
+
+  List<Stroke> _strokesOf(api.Note? n, String id) {
+    final page = n?.pages?.where((p) => p.pageNumber == 1).firstOrNull;
+    final base = DateTime.now().toUtc();
+    final strokes =
+        (page?.strokes ?? const []).whereType<Map<String, dynamic>>().toList();
+    return [
+      for (var i = 0; i < strokes.length; i++)
+        strokeFromInkJson(id, strokes[i], base.add(Duration(milliseconds: i))),
+    ];
+  }
+
+  /// Caches [remote] locally and returns it with the parts that have a
+  /// pending local edit replaced by their local version. When
+  /// [serverMayBeBehind] (one of our pushes raced the read), the local copy
+  /// is kept as it is and wins for every part. A local store problem never
+  /// keeps the note from opening.
+  Future<api.Note> _withLocalEdits(
+    api.Note remote, {
+    bool serverMayBeBehind = false,
+  }) async {
+    try {
+      await _ensureLocalReady();
+      final localId = await _localService.cacheRemoteNote(
+          _mirrorOf(remote, remote.id), _strokesOf(remote, remote.id),
+          refresh: !serverMayBeBehind);
+      _knownNotes.remove(remote.id);
+      final row = await _localService.getNoteById(localId);
+      if (row == null) return remote;
+      final useTitle = serverMayBeBehind || row.titlePending;
+      final useText = serverMayBeBehind || row.textPending;
+      final useInk = serverMayBeBehind || row.inkPending;
+      if (!useTitle && !useText && !useInk) return remote;
+      final ink = useInk ? await _localService.readInk(localId) : null;
+      final pages = [...?remote.pages];
+      final i = pages.indexWhere((p) => p.pageNumber == 1);
+      final page = i < 0 ? null : pages[i];
+      final merged = api.NotePage(
+        pageNumber: 1,
+        template: page?.template ?? 'blank',
+        typedContent: useText ? row.typedContent : page?.typedContent ?? '',
+        strokes: ink != null
+            ? ink.strokes.map(inkJsonFromStroke).toList()
+            : page?.strokes ?? const [],
+      );
+      if (i < 0) {
+        pages.insert(0, merged);
+      } else {
+        pages[i] = merged;
+      }
+      return remote.copyWith(
+        title: useTitle ? row.title : remote.title,
+        pages: pages,
+      );
+    } catch (e) {
+      debugPrint('Could not use the local copy of note ${remote.id}: $e');
+      return remote;
+    }
+  }
+
+  /// The local copy of server note [id] in the editor's shape, or null.
+  Future<api.Note?> _localCopyOf(String id) async {
+    try {
+      await _ensureLocalReady();
+      final localId = await _localService.localIdForRemote(id);
+      if (localId == null) return null;
+      final row = await _localService.getNoteById(localId);
+      // A row without content would open as an empty page.
+      if (row == null || row.isDeleted || !row.hasContent) return null;
+      final strokes = await _localService.getStrokesForNote(localId);
+      return _toApiNoteWithContent(row, strokes: strokes, id: id);
+    } catch (e) {
+      debugPrint('No local copy of note $id: $e');
+      return null;
+    }
+  }
+
+  Future<String?> _localIdOrNull(String id) async {
+    try {
+      await _ensureLocalReady();
+      return await _localService.localIdForRemote(id);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Forgets the local copy ([localId]) of note [id], deleted on the server.
+  Future<void> _dropLocalCopy(String id, String? localId) async {
+    _knownNotes.remove(id);
+    _stagedInk.remove(id);
+    if (localId == null) return;
+    _stagedInk.remove(localId);
+    try {
+      await _localService.hardDeleteNote(localId);
+    } catch (e) {
+      debugPrint('Could not drop the local copy of note $id: $e');
+    }
+  }
+
+  static bool _isClientError(Object e) =>
+      e is api.ApiException && e.statusCode != null && e.statusCode! < 500;
+
   void selectNote(api.Note? note) { _selectedNote = note; notifyListeners(); }
+
+  /// Loads note [id] with its content and selects it. Returns null when the
+  /// user picked another note before this one finished loading, so a slow
+  /// load can't replace the newer selection.
+  Future<api.Note?> openNote(String id) async {
+    final request = ++_openRequest;
+    final full = await getNote(id);
+    if (request != _openRequest) return null;
+    selectNote(full);
+    return full;
+  }
 
   Future<String> triggerSync() async {
     if (_localMode) {
@@ -666,6 +1170,7 @@ class AppState extends ChangeNotifier {
     }
     _beginSync();
     try {
+      await _pushEditsSavedOnDevice();
       final result = await client.triggerSync();
       final summary = result['summary'] ?? 'Sync complete';
       _markBackendAvailable();
@@ -698,9 +1203,18 @@ class AppState extends ChangeNotifier {
     _beginSync();
     try {
       await initLocal();
+      // Edits saved on this device go first, so the pull below can't be
+      // older than them. A note that fails to push doesn't stop the sync.
+      Object? pushError;
+      try {
+        await _pushAllPending();
+      } catch (e) {
+        pushError = e;
+      }
       final svc = service ??
           SyncService(apiClient: client, local: _localService);
       final result = await svc.sync();
+      if (pushError != null) throw pushError;
       _markBackendAvailable();
       await _markEverConnected();
       _finishSync(message: 'Sync complete — ${result.summary}');
@@ -716,7 +1230,15 @@ class AppState extends ChangeNotifier {
   /// refreshes [_notebooks]/[_notes] from the local SQLite store so the UI can
   /// keep working offline. Reuses the same flag and message as the
   /// startup-time path so the existing offline banner kicks in unchanged.
-  Future<void> _handleBackendFailure(Object _) async {
+  Future<void> _handleBackendFailure(Object error) async {
+    // The server answered with a client error (404 for a note another device
+    // already deleted, 409, 422...): it is up, so don't switch the whole app
+    // to the offline banner and the local cache.
+    if (error is api.ApiException &&
+        error.statusCode != null &&
+        error.statusCode! < 500) {
+      return;
+    }
     final wasAvailable = _isBackendAvailable;
     _isBackendAvailable = false;
     _backendErrorMessage = 'Offline mode — backend unavailable';
@@ -752,53 +1274,3 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 }
-
-/// Converts an editor/wire ink stroke (`{id,color,width,tool,points:[…]}`) into
-/// the local [Stroke] model for SQLite persistence. The editor emits point
-/// timestamps under `ts`; the local model stores them as `timestampMs`.
-/// Tolerant of missing fields so a malformed stroke degrades gracefully rather
-/// than throwing and losing the whole drawing.
-Stroke strokeFromInkJson(
-  String noteId,
-  Map<String, dynamic> json,
-  DateTime createdAt,
-) {
-  final rawPoints = (json['points'] as List?) ?? const [];
-  return Stroke(
-    id: (json['id'] as String?) ??
-        DateTime.now().microsecondsSinceEpoch.toString(),
-    noteId: noteId,
-    color: (json['color'] as String?) ?? '#000000',
-    width: (json['width'] as num?)?.toDouble() ?? 2.0,
-    tool: (json['tool'] as String?) ?? 'pen',
-    createdAt: createdAt,
-    points: [
-      for (final p in rawPoints)
-        if (p is Map)
-          StrokePoint(
-            x: (p['x'] as num?)?.toDouble() ?? 0,
-            y: (p['y'] as num?)?.toDouble() ?? 0,
-            pressure: (p['pressure'] as num?)?.toDouble() ?? 0.5,
-            timestampMs: (p['ts'] as num?)?.toInt() ?? 0,
-          ),
-    ],
-  );
-}
-
-/// Inverse of [strokeFromInkJson]: renders a local [Stroke] back into the
-/// editor/wire shape so the ink canvas can replay a saved drawing.
-Map<String, dynamic> inkJsonFromStroke(Stroke stroke) => {
-      'id': stroke.id,
-      'color': stroke.color,
-      'width': stroke.width,
-      'tool': stroke.tool,
-      'points': [
-        for (final p in stroke.points)
-          {
-            'x': p.x,
-            'y': p.y,
-            'pressure': p.pressure,
-            'ts': p.timestampMs,
-          },
-      ],
-    };

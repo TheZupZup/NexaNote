@@ -28,7 +28,7 @@ class NexaNoteApp extends StatelessWidget {
       themeMode: ThemeMode.system,
       home: Consumer<AppState>(
         builder: (context, state, _) {
-          if (state.isLoading) {
+          if (state.isStarting) {
             return const _SplashScreen();
           }
           // First launch only: offer "Use offline" or "Connect to a server".
@@ -67,7 +67,7 @@ class NexaNoteApp extends StatelessWidget {
       ),
       navigationRailTheme: NavigationRailThemeData(
         backgroundColor: isDark ? const Color(0xFF181825) : const Color(0xFFF5F5FF),
-        indicatorColor: primary.withOpacity(0.15),
+        indicatorColor: primary.withValues(alpha: 0.15),
         selectedIconTheme: const IconThemeData(color: primary),
         selectedLabelTextStyle: const TextStyle(color: primary, fontWeight: FontWeight.w600),
       ),
@@ -149,7 +149,7 @@ class _SplashScreenState extends State<_SplashScreen> with SingleTickerProviderS
                         borderRadius: BorderRadius.circular(20),
                         boxShadow: [
                           BoxShadow(
-                            color: const Color(0xFF6366F1).withOpacity(0.3),
+                            color: const Color(0xFF6366F1).withValues(alpha: 0.3),
                             blurRadius: 20,
                             spreadRadius: 2,
                           ),
@@ -176,7 +176,7 @@ class _SplashScreenState extends State<_SplashScreen> with SingleTickerProviderS
                 _loadingMessage,
                 key: ValueKey<String>(_loadingMessage),
                 style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                      color: Theme.of(context).colorScheme.onSurface.withOpacity(0.6),
+                      color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.6),
                     ),
               ),
             ),
@@ -184,7 +184,7 @@ class _SplashScreenState extends State<_SplashScreen> with SingleTickerProviderS
             SizedBox(
               width: 120,
               child: LinearProgressIndicator(
-                backgroundColor: const Color(0xFF6366F1).withOpacity(0.2),
+                backgroundColor: const Color(0xFF6366F1).withValues(alpha: 0.2),
                 color: const Color(0xFF6366F1),
                 borderRadius: BorderRadius.circular(4),
               ),

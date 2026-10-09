@@ -1,6 +1,7 @@
 // lib/services/api_client.dart
 // Parle avec le backend Python (API REST sur port 8766)
 
+import 'dart:async';
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 
@@ -125,10 +126,60 @@ class NotePage {
       );
 }
 
+/// A backend call that did not succeed: unexpected HTTP status, or a request
+/// that took longer than its timeout.
+class ApiException implements Exception {
+  final String message;
+  final int? statusCode;
+  const ApiException(this.message, {this.statusCode});
+
+  @override
+  String toString() =>
+      statusCode == null ? message : '$message (HTTP $statusCode)';
+}
+
 class ApiClient {
   final String baseUrl;
+  final http.Client? _httpClient;
 
-  ApiClient({required this.baseUrl});
+  /// Upper bound for ordinary requests. Without one, a server that accepts
+  /// the connection and never answers leaves a save "Saving…" forever.
+  static const Duration requestTimeout = Duration(seconds: 20);
+
+  /// Saves carry the whole page (a long drawing can be megabytes), so on a
+  /// slow mobile uplink they get more time than ordinary requests.
+  static const Duration uploadTimeout = Duration(minutes: 2);
+
+  /// `/sync/trigger` runs a whole WebDAV sync before answering.
+  static const Duration syncTimeout = Duration(minutes: 5);
+
+  ApiClient({required this.baseUrl, http.Client? httpClient})
+      : _httpClient = httpClient;
+
+  Future<http.Response> _send(
+    String what,
+    Future<http.Response> Function(http.Client client) request, {
+    Duration timeout = requestTimeout,
+  }) async {
+    final injected = _httpClient;
+    final client = injected ?? http.Client();
+    try {
+      return await request(client).timeout(timeout);
+    } on TimeoutException {
+      throw ApiException('$what timed out after ${timeout.inSeconds}s');
+    } finally {
+      if (injected == null) client.close();
+    }
+  }
+
+  /// Throws unless [resp] has one of the [expected] status codes. Write calls
+  /// must not report success when the server refused the change.
+  static void _expect(http.Response resp, String what,
+      [List<int> expected = const [200]]) {
+    if (!expected.contains(resp.statusCode)) {
+      throw ApiException(what, statusCode: resp.statusCode);
+    }
+  }
 
   Map<String, String> get _headers => {
         'Content-Type': 'application/json',
@@ -141,9 +192,9 @@ class ApiClient {
 
   Future<bool> ping() async {
     try {
-      final resp = await http
-          .get(Uri.parse('$baseUrl/health'))
-          .timeout(const Duration(seconds: 5));
+      final resp = await _send('Ping',
+          (c) => c.get(Uri.parse('$baseUrl/health')),
+          timeout: const Duration(seconds: 5));
       return resp.statusCode == 200;
     } catch (_) {
       return false;
@@ -155,34 +206,36 @@ class ApiClient {
   // ----------------------------------------------------------------
 
   Future<List<Notebook>> getNotebooks() async {
-    final resp = await http.get(
-      Uri.parse('$baseUrl/notebooks'),
-      headers: _headers,
-    );
-    if (resp.statusCode == 200) {
-      final List data = jsonDecode(resp.body);
-      return data.map((j) => Notebook.fromJson(j)).toList();
-    }
-    throw Exception('Failed to load notebooks: ${resp.statusCode}');
+    const what = 'Failed to load notebooks';
+    final resp = await _send(
+        what, (c) => c.get(Uri.parse('$baseUrl/notebooks'), headers: _headers));
+    _expect(resp, what);
+    final List data = jsonDecode(resp.body);
+    return data.map((j) => Notebook.fromJson(j)).toList();
   }
 
   Future<Notebook> createNotebook({
     required String name,
     String color = '#6366f1',
   }) async {
-    final resp = await http.post(
-      Uri.parse('$baseUrl/notebooks'),
-      headers: _headers,
-      body: jsonEncode({'name': name, 'color': color}),
-    );
-    if (resp.statusCode == 201) {
-      return Notebook.fromJson(jsonDecode(resp.body));
-    }
-    throw Exception('Failed to create notebook');
+    const what = 'Failed to create notebook';
+    final resp = await _send(
+        what,
+        (c) => c.post(
+              Uri.parse('$baseUrl/notebooks'),
+              headers: _headers,
+              body: jsonEncode({'name': name, 'color': color}),
+            ));
+    _expect(resp, what, const [201]);
+    return Notebook.fromJson(jsonDecode(resp.body));
   }
 
   Future<void> deleteNotebook(String id) async {
-    await http.delete(Uri.parse('$baseUrl/notebooks/$id'));
+    const what = 'Failed to delete notebook';
+    final resp = await _send(
+        what, (c) => c.delete(Uri.parse('$baseUrl/notebooks/$id')));
+    // 404: already gone (deleted from another device), which is the goal.
+    _expect(resp, what, const [200, 204, 404]);
   }
 
   // ----------------------------------------------------------------
@@ -199,24 +252,22 @@ class ApiClient {
     if (search != null && search.isNotEmpty) params['q'] = search;
     if (includeDeleted) params['include_deleted'] = 'true';
 
+    const what = 'Failed to load notes';
     final uri = Uri.parse('$baseUrl/notes').replace(queryParameters: params);
-    final resp = await http.get(uri, headers: _headers);
-    if (resp.statusCode == 200) {
-      final List data = jsonDecode(resp.body);
-      return data.map((j) => Note.fromJson(j)).toList();
-    }
-    throw Exception('Failed to load notes');
+    final resp = await _send(what, (c) => c.get(uri, headers: _headers));
+    _expect(resp, what);
+    final List data = jsonDecode(resp.body);
+    return data.map((j) => Note.fromJson(j)).toList();
   }
 
   Future<Note> getNote(String id) async {
-    final resp = await http.get(
-      Uri.parse('$baseUrl/notes/$id?pages=true'),
-      headers: _headers,
-    );
-    if (resp.statusCode == 200) {
-      return Note.fromJson(jsonDecode(resp.body));
-    }
-    throw Exception('Failed to load note');
+    const what = 'Failed to load note';
+    final resp = await _send(
+        what,
+        (c) =>
+            c.get(Uri.parse('$baseUrl/notes/$id?pages=true'), headers: _headers));
+    _expect(resp, what);
+    return Note.fromJson(jsonDecode(resp.body));
   }
 
   Future<Note> createNote({
@@ -225,20 +276,21 @@ class ApiClient {
     String? notebookId,
     String template = 'blank',
   }) async {
-    final resp = await http.post(
-      Uri.parse('$baseUrl/notes'),
-      headers: _headers,
-      body: jsonEncode({
-        'title': title,
-        'note_type': noteType,
-        if (notebookId != null) 'notebook_id': notebookId,
-        'template': template,
-      }),
-    );
-    if (resp.statusCode == 201) {
-      return Note.fromJson(jsonDecode(resp.body));
-    }
-    throw Exception('Failed to create note');
+    const what = 'Failed to create note';
+    final resp = await _send(
+        what,
+        (c) => c.post(
+              Uri.parse('$baseUrl/notes'),
+              headers: _headers,
+              body: jsonEncode({
+                'title': title,
+                'note_type': noteType,
+                if (notebookId != null) 'notebook_id': notebookId,
+                'template': template,
+              }),
+            ));
+    _expect(resp, what, const [201]);
+    return Note.fromJson(jsonDecode(resp.body));
   }
 
   Future<Note> updateNote(
@@ -252,44 +304,79 @@ class ApiClient {
     if (isPinned != null) body['is_pinned'] = isPinned;
     if (tags != null) body['tags'] = tags;
 
-    final resp = await http.put(
-      Uri.parse('$baseUrl/notes/$id'),
-      headers: _headers,
-      body: jsonEncode(body),
-    );
-    if (resp.statusCode == 200) {
-      return Note.fromJson(jsonDecode(resp.body));
-    }
-    throw Exception('Failed to update note');
+    const what = 'Failed to update note';
+    final resp = await _send(
+        what,
+        (c) => c.put(
+              Uri.parse('$baseUrl/notes/$id'),
+              headers: _headers,
+              body: jsonEncode(body),
+            ));
+    _expect(resp, what);
+    return Note.fromJson(jsonDecode(resp.body));
   }
 
   Future<void> deleteNote(String id) async {
-    await http.delete(Uri.parse('$baseUrl/notes/$id'));
+    const what = 'Failed to delete note';
+    final resp =
+        await _send(what, (c) => c.delete(Uri.parse('$baseUrl/notes/$id')));
+    // 404: already gone (deleted from another device), which is the goal.
+    _expect(resp, what, const [200, 204, 404]);
   }
 
   Future<void> restoreNote(String id) async {
-    await http.post(Uri.parse('$baseUrl/notes/$id/restore'));
+    const what = 'Failed to restore note';
+    final resp = await _send(
+        what, (c) => c.post(Uri.parse('$baseUrl/notes/$id/restore')));
+    _expect(resp, what);
   }
 
   // ----------------------------------------------------------------
   // Page text content
   // ----------------------------------------------------------------
 
-  Future<void> savePageText(String noteId, int pageNum, String content) async {
-    await http.put(
-      Uri.parse('$baseUrl/notes/$noteId/pages/$pageNum/text'),
-      headers: _headers,
-      body: jsonEncode({'typed_content': content}),
-    );
+  /// Saves page text and returns the note's updated_at after the write, as
+  /// the server reports it (null when it doesn't).
+  Future<String?> savePageText(
+      String noteId, int pageNum, String content) async {
+    const what = 'Failed to save text';
+    final resp = await _send(
+        what,
+        (c) => c.put(
+              Uri.parse('$baseUrl/notes/$noteId/pages/$pageNum/text'),
+              headers: _headers,
+              body: jsonEncode({'typed_content': content}),
+            ),
+        timeout: uploadTimeout);
+    _expect(resp, what);
+    return _noteVersion(resp);
   }
 
-  Future<void> savePageInk(
+  /// Saves a page's drawing; returns the note's updated_at like
+  /// [savePageText].
+  Future<String?> savePageInk(
       String noteId, int pageNum, List<Map<String, dynamic>> strokes) async {
-    await http.put(
-      Uri.parse('$baseUrl/notes/$noteId/pages/$pageNum/ink'),
-      headers: _headers,
-      body: jsonEncode({'strokes': strokes}),
-    );
+    const what = 'Failed to save drawing';
+    final resp = await _send(
+        what,
+        (c) => c.put(
+              Uri.parse('$baseUrl/notes/$noteId/pages/$pageNum/ink'),
+              headers: _headers,
+              body: jsonEncode({'strokes': strokes}),
+            ),
+        timeout: uploadTimeout);
+    _expect(resp, what);
+    return _noteVersion(resp);
+  }
+
+  static String? _noteVersion(http.Response resp) {
+    try {
+      final body = jsonDecode(resp.body);
+      final version = body is Map ? body['note_updated_at'] : null;
+      return version is String && version.isNotEmpty ? version : null;
+    } on FormatException {
+      return null;
+    }
   }
 
   // ----------------------------------------------------------------
@@ -297,10 +384,10 @@ class ApiClient {
   // ----------------------------------------------------------------
 
   Future<Map<String, dynamic>> triggerSync() async {
-    final resp = await http.post(
-      Uri.parse('$baseUrl/sync/trigger'),
-      headers: _headers,
-    );
+    final resp = await _send(
+        'Sync',
+        (c) => c.post(Uri.parse('$baseUrl/sync/trigger'), headers: _headers),
+        timeout: syncTimeout);
     if (resp.statusCode == 200) {
       return jsonDecode(resp.body);
     }
@@ -308,7 +395,8 @@ class ApiClient {
   }
 
   Future<Map<String, dynamic>> getSyncStatus() async {
-    final resp = await http.get(Uri.parse('$baseUrl/sync/status'));
+    final resp = await _send(
+        'Sync status', (c) => c.get(Uri.parse('$baseUrl/sync/status')));
     if (resp.statusCode == 200) return jsonDecode(resp.body);
     return {'status': 'unknown'};
   }
@@ -318,15 +406,19 @@ class ApiClient {
     required String username,
     required String password,
   }) async {
-    await http.post(
-      Uri.parse('$baseUrl/sync/configure'),
-      headers: _headers,
-      body: jsonEncode({
-        'server_url': serverUrl,
-        'username': username,
-        'password': password,
-      }),
-    );
+    const what = 'Failed to configure sync';
+    final resp = await _send(
+        what,
+        (c) => c.post(
+              Uri.parse('$baseUrl/sync/configure'),
+              headers: _headers,
+              body: jsonEncode({
+                'server_url': serverUrl,
+                'username': username,
+                'password': password,
+              }),
+            ));
+    _expect(resp, what);
   }
 
   // ----------------------------------------------------------------
@@ -334,13 +426,15 @@ class ApiClient {
   // ----------------------------------------------------------------
 
   Future<Map<String, dynamic>> getStats() async {
-    final resp = await http.get(Uri.parse('$baseUrl/stats'));
+    final resp =
+        await _send('Stats', (c) => c.get(Uri.parse('$baseUrl/stats')));
     if (resp.statusCode == 200) return jsonDecode(resp.body);
     return {};
   }
 
   Future<Map<String, dynamic>> getStorageInfo() async {
-    final resp = await http.get(Uri.parse('$baseUrl/storage'));
+    final resp =
+        await _send('Storage info', (c) => c.get(Uri.parse('$baseUrl/storage')));
     if (resp.statusCode == 200) return jsonDecode(resp.body);
     return {};
   }

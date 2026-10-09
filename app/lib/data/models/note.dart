@@ -1,5 +1,17 @@
 import 'dart:convert';
 
+/// The independently saved parts of a note, each with its own edit
+/// revision (see [Note.titleRev] and friends).
+enum NotePart {
+  title('title_rev', 'title_synced_rev'),
+  text('text_rev', 'text_synced_rev'),
+  ink('ink_rev', 'ink_synced_rev');
+
+  const NotePart(this.revColumn, this.syncedRevColumn);
+  final String revColumn;
+  final String syncedRevColumn;
+}
+
 /// A note in a notebook.
 ///
 /// For Phase 2 this model covers the notes table directly.
@@ -19,6 +31,23 @@ import 'dart:convert';
 /// remote (e.g. `notes/Hello World.md`). Stored so renames on disk can be
 /// followed without losing the link.
 ///
+/// [remoteBaseline] is the server's `updated_at` for the note right after
+/// our push created it or last wrote content into it. While an upload is
+/// pending it is the only proof that nobody else changed the remote note
+/// since.
+///
+/// The `*Rev` / `*SyncedRev` pairs count local edits of the title, the text
+/// and the drawing, and the last of each the server has confirmed. A part
+/// whose revision is ahead is a local edit not yet on the server; the local
+/// row is its only durable copy until then.
+///
+/// [hasContent] is false for rows that only hold a note's metadata (what a
+/// pull brings): their text and drawing were never downloaded, so they
+/// are not the note's content. [blindEdit] marks text or ink edited into
+/// such a row in local mode, on what looked like an empty page: sending
+/// that into the server note would wipe its real content, so it becomes a
+/// note of its own instead.
+///
 /// Mirrors Note in nexanote/models/note.py.
 class Note {
   final String id;
@@ -33,6 +62,15 @@ class Note {
   final String syncStatus;
   final String? remoteId;
   final String? remotePath;
+  final String? remoteBaseline;
+  final int titleRev;
+  final int titleSyncedRev;
+  final int textRev;
+  final int textSyncedRev;
+  final int inkRev;
+  final int inkSyncedRev;
+  final bool hasContent;
+  final bool blindEdit;
   final DateTime createdAt;
   final DateTime updatedAt;
 
@@ -49,6 +87,15 @@ class Note {
     this.syncStatus = 'local_only',
     this.remoteId,
     this.remotePath,
+    this.remoteBaseline,
+    this.titleRev = 0,
+    this.titleSyncedRev = 0,
+    this.textRev = 0,
+    this.textSyncedRev = 0,
+    this.inkRev = 0,
+    this.inkSyncedRev = 0,
+    this.hasContent = true,
+    this.blindEdit = false,
     required this.createdAt,
     required this.updatedAt,
   });
@@ -69,6 +116,15 @@ class Note {
       syncStatus: (map['sync_status'] as String?) ?? 'local_only',
       remoteId: map['remote_id'] as String?,
       remotePath: map['remote_path'] as String?,
+      remoteBaseline: map['remote_baseline'] as String?,
+      titleRev: (map['title_rev'] as int?) ?? 0,
+      titleSyncedRev: (map['title_synced_rev'] as int?) ?? 0,
+      textRev: (map['text_rev'] as int?) ?? 0,
+      textSyncedRev: (map['text_synced_rev'] as int?) ?? 0,
+      inkRev: (map['ink_rev'] as int?) ?? 0,
+      inkSyncedRev: (map['ink_synced_rev'] as int?) ?? 0,
+      hasContent: ((map['has_content'] as int?) ?? 1) == 1,
+      blindEdit: ((map['blind_edit'] as int?) ?? 0) == 1,
       createdAt: DateTime.parse(map['created_at'] as String),
       updatedAt: DateTime.parse(map['updated_at'] as String),
     );
@@ -88,6 +144,15 @@ class Note {
       'sync_status': syncStatus,
       'remote_id': remoteId,
       'remote_path': remotePath,
+      'remote_baseline': remoteBaseline,
+      'title_rev': titleRev,
+      'title_synced_rev': titleSyncedRev,
+      'text_rev': textRev,
+      'text_synced_rev': textSyncedRev,
+      'ink_rev': inkRev,
+      'ink_synced_rev': inkSyncedRev,
+      'has_content': hasContent ? 1 : 0,
+      'blind_edit': blindEdit ? 1 : 0,
       'created_at': createdAt.toIso8601String(),
       'updated_at': updatedAt.toIso8601String(),
     };
@@ -106,6 +171,7 @@ class Note {
     String? syncStatus,
     String? remoteId,
     String? remotePath,
+    bool? hasContent,
     DateTime? updatedAt,
   }) {
     return Note(
@@ -122,10 +188,24 @@ class Note {
       syncStatus: syncStatus ?? this.syncStatus,
       remoteId: remoteId ?? this.remoteId,
       remotePath: remotePath ?? this.remotePath,
+      remoteBaseline: remoteBaseline,
+      titleRev: titleRev,
+      titleSyncedRev: titleSyncedRev,
+      textRev: textRev,
+      textSyncedRev: textSyncedRev,
+      inkRev: inkRev,
+      inkSyncedRev: inkSyncedRev,
+      hasContent: hasContent ?? this.hasContent,
+      blindEdit: blindEdit,
       createdAt: createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
     );
   }
+
+  bool get titlePending => titleRev > titleSyncedRev;
+  bool get textPending => textRev > textSyncedRev;
+  bool get inkPending => inkRev > inkSyncedRev;
+  bool get hasPendingEdits => titlePending || textPending || inkPending;
 
   @override
   String toString() => 'Note(id: $id, title: $title, type: $noteType)';

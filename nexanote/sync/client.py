@@ -15,6 +15,7 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -111,6 +112,11 @@ def _transient_exception_reason(exc: BaseException) -> str:
     FR: Motif court et sans URL pour une exception réseau transitoire.
     """
     return type(exc).__name__
+
+
+class RemoteReadError(Exception):
+    """A listing or download from the WebDAV server failed (as opposed to the
+    resource legitimately not existing)."""
 
 
 @dataclass
@@ -398,22 +404,32 @@ class WebDAVClient:
         return resp is not None and resp.status_code < 400
 
     def list_notebooks(self) -> list[dict]:
-        """PROPFIND sur / — retourne la liste des carnets."""
-        return self._propfind(self.base_url, depth=1, path_label="/")
+        """PROPFIND sur / — retourne la liste des carnets.
+
+        Raises RemoteReadError when the listing fails: an unreadable server
+        must never look like an empty one, or push would overwrite remote
+        notes that pull never got to see.
+        """
+        return self._listing(self.base_url, "/")
 
     def list_notes(self, notebook_slug: str) -> list[dict]:
-        """PROPFIND sur /{notebook} — retourne la liste des notes."""
-        return self._propfind(
-            self._url(notebook_slug), depth=1, path_label=notebook_slug
-        )
+        """PROPFIND sur /{notebook} — retourne la liste des notes.
+
+        A notebook folder that does not exist (404) lists as empty.
+        """
+        return self._listing(self._url(notebook_slug), notebook_slug)
 
     def list_note_files(self, notebook_slug: str, note_slug: str) -> list[dict]:
         """PROPFIND sur /{notebook}/{note} — retourne les fichiers."""
-        return self._propfind(
-            self._url(notebook_slug, note_slug),
-            depth=1,
-            path_label=f"{notebook_slug}/{note_slug}",
+        return self._listing(
+            self._url(notebook_slug, note_slug), f"{notebook_slug}/{note_slug}"
         )
+
+    def _listing(self, url: str, path_label: str) -> list[dict]:
+        entries = self._propfind(url, depth=1, path_label=path_label)
+        if entries is None:
+            raise RemoteReadError(f"PROPFIND {path_label} failed")
+        return entries
 
     def get_note_meta(self, notebook_slug: str, note_slug: str) -> Optional[dict]:
         """GET /{notebook}/{note}/note.json (avec retry transitoire)."""
@@ -422,13 +438,18 @@ class WebDAVClient:
         resp = self._execute(
             "GET", path, lambda: self.session.get(url, timeout=self.config.timeout_seconds)
         )
-        if resp is None or resp.status_code != 200:
+        # Only a 404 means the note is gone; any other failure must not be
+        # mistaken for it, or push would overwrite the version we failed
+        # to read.
+        if resp is not None and resp.status_code == 404:
             return None
+        if resp is None or resp.status_code != 200:
+            status = "no response" if resp is None else resp.status_code
+            raise RemoteReadError(f"GET {path} failed ({status})")
         try:
             return resp.json()
         except ValueError as e:
-            logger.error(f"GET note.json invalid JSON ({path}): {e}")
-            return None
+            raise RemoteReadError(f"GET {path} returned invalid JSON: {e}") from e
 
     def get_ink_page(self, notebook_slug: str, note_slug: str, page_num: int) -> Optional[dict]:
         """GET /{notebook}/{note}/page_N.ink (avec retry transitoire)."""
@@ -437,13 +458,20 @@ class WebDAVClient:
         resp = self._execute(
             "GET", path, lambda: self.session.get(url, timeout=self.config.timeout_seconds)
         )
-        if resp is None or resp.status_code != 200:
+        # EN: Only a 404 means "this page has no drawing". Any other failure
+        #     must not be read as "no strokes": the pulled note would then
+        #     be saved over the local copy and its drawing wiped.
+        # FR: Seul un 404 signifie « pas de dessin » ; toute autre erreur
+        #     est remontée pour ne pas effacer les traits locaux.
+        if resp is not None and resp.status_code == 404:
             return None
+        if resp is None or resp.status_code != 200:
+            status = "no response" if resp is None else resp.status_code
+            raise RemoteReadError(f"GET {path} failed ({status})")
         try:
             return resp.json()
         except ValueError as e:
-            logger.error(f"GET page.ink invalid JSON ({path}): {e}")
-            return None
+            raise RemoteReadError(f"GET {path} returned invalid JSON: {e}") from e
 
     def put_note_meta(
         self, notebook_slug: str, note_slug: str, data: dict
@@ -620,10 +648,11 @@ class WebDAVClient:
 
     def _propfind(
         self, url: str, depth: int = 1, path_label: Optional[str] = None
-    ) -> list[dict]:
+    ) -> Optional[list[dict]]:
         """
         PROPFIND WebDAV — liste les ressources à un niveau donné (avec retry).
-        Retourne une liste simplifiée de {name, href, is_collection, last_modified}.
+        Retourne une liste simplifiée de {name, href, is_collection, last_modified},
+        [] si la collection n'existe pas (404), None si le listing a échoué.
         """
         body = b"""<?xml version="1.0" encoding="utf-8"?>
 <D:propfind xmlns:D="DAV:">
@@ -649,9 +678,11 @@ class WebDAVClient:
         )
         if resp is not None and resp.status_code == 207:  # Multi-Status
             return self._parse_propfind(resp.text, url)
-        return []
+        if resp is not None and resp.status_code == 404:
+            return []
+        return None
 
-    def _parse_propfind(self, xml_text: str, base_url: str) -> list[dict]:
+    def _parse_propfind(self, xml_text: str, base_url: str) -> Optional[list[dict]]:
         """Parse la réponse XML PROPFIND en liste de ressources."""
         import xml.etree.ElementTree as ET
 
@@ -700,6 +731,7 @@ class WebDAVClient:
                 })
         except ET.ParseError as e:
             logger.error(f"Erreur parsing PROPFIND XML: {e}")
+            return None
 
         return resources
 
@@ -746,6 +778,16 @@ def _deserialize_note(meta: dict, ink_pages: dict[int, dict]) -> Note:
             template=page_data.get("template", "blank"),
             typed_content=page_data.get("typed_content", ""),
         )
+        # EN: Page() defaults updated_at to now(), which made every remote
+        #     page look newer than any local edit, so a merge always took
+        #     the remote text. Use the page's own timestamp when the server
+        #     sends one, else the remote note's.
+        # FR: Sans ça, la page distante paraît toujours plus récente et
+        #     écrase le texte local lors d'une fusion.
+        if page_data.get("updated_at"):
+            page.updated_at = datetime.fromisoformat(page_data["updated_at"])
+        else:
+            page.updated_at = note.updated_at
         # Charger les strokes si disponibles
         if num in ink_pages:
             for s_data in ink_pages[num].get("strokes", []):
@@ -785,10 +827,30 @@ def _serialize_note_meta(note: Note) -> dict:
                 "page_number": p.page_number,
                 "template": p.template,
                 "typed_content": p.typed_content,
+                "updated_at": p.updated_at.isoformat(),
             }
             for p in note.pages
         ],
     }
+
+
+def _slug_id_prefix(note_slug: str) -> str:
+    """The note id prefix a `<title>__<id[:8]>` slug ends with."""
+    return note_slug.rsplit("__", 1)[-1]
+
+
+def _carry_local_fields(remote: Note, local: Note) -> None:
+    """
+    EN: note.json does not carry the notebook or the archived/deleted flags,
+        so a note deserialized from the server has none. Keep the local
+        values instead of wiping them every time a pull applies a remote
+        version.
+    FR: note.json ne transporte ni le carnet ni les drapeaux archivé /
+        supprimé : on garde les valeurs locales.
+    """
+    remote.notebook_id = local.notebook_id
+    remote.is_archived = local.is_archived
+    remote.is_deleted = local.is_deleted
 
 
 def _serialize_ink_page(page: Page) -> dict:
@@ -834,6 +896,16 @@ def _make_local_conflict_copy(local: Note) -> Note:
     conflict_copy.title = f"{local.title} (conflit {ts})"
     conflict_copy.sync_status = SyncStatus.LOCAL_ONLY
     return conflict_copy
+
+
+_SYNC_LOCKS: dict[str, threading.Lock] = {}
+_SYNC_LOCKS_GUARD = threading.Lock()
+
+
+def _sync_lock_for(data_dir: Path) -> threading.Lock:
+    key = str(Path(data_dir).resolve())
+    with _SYNC_LOCKS_GUARD:
+        return _SYNC_LOCKS.setdefault(key, threading.Lock())
 
 
 class NexaNoteSyncEngine:
@@ -901,6 +973,26 @@ class NexaNoteSyncEngine:
 
     def sync(self) -> SyncReport:
         """
+        EN: Run a sync session unless one is already running on the same data
+            directory (two quick taps on "Sync", a manual sync during an
+            automatic one). Overlapping sessions resolved the same conflicts
+            twice and wrote duplicate conflict copies.
+        FR: Refuse une session concurrente sur le même dossier de données.
+        """
+        lock = _sync_lock_for(self.db.data_dir)
+        if not lock.acquire(blocking=False):
+            report = SyncReport()
+            report.dry_run = self.dry_run
+            report.errors.append("Une synchronisation est déjà en cours")
+            report.finish()
+            return report
+        try:
+            return self._sync()
+        finally:
+            lock.release()
+
+    def _sync(self) -> SyncReport:
+        """
         EN: Run a full sync session: ping → pull → push. The ``SyncPlan`` is
             built as decisions are made; in dry-run no files, sync state, or
             remote resources are touched and no log is written. Otherwise the
@@ -911,6 +1003,8 @@ class NexaNoteSyncEngine:
         """
         report = SyncReport()
         report.dry_run = self.dry_run
+        self._unreadable_notebooks: set[str] = set()
+        self._unreadable_note_prefixes: set[str] = set()
         self.plan = SyncPlan()
         report.plan = self.plan
         logger.info(
@@ -1029,7 +1123,16 @@ class NexaNoteSyncEngine:
             self._pull_notebook(nb_slug, report)
 
     def _pull_notebook(self, nb_slug: str, report: SyncReport) -> None:
-        remote_notes = self.client.list_notes(nb_slug)
+        try:
+            remote_notes = self.client.list_notes(nb_slug)
+        except RemoteReadError as e:
+            # Its notes were not compared with the server, so pushing into
+            # this notebook could overwrite newer remote versions.
+            self._unreadable_notebooks.add(nb_slug)
+            msg = f"Erreur pull carnet {nb_slug}: {e}"
+            logger.error(msg)
+            report.errors.append(msg)
+            return
         logger.debug(f"  Carnet {nb_slug} : {len(remote_notes)} notes")
 
         for note_entry in remote_notes:
@@ -1039,6 +1142,9 @@ class NexaNoteSyncEngine:
             try:
                 self._pull_note(nb_slug, note_slug, report)
             except Exception as e:
+                # This note was not compared with the server, so pushing the
+                # local copy could overwrite a newer remote version.
+                self._unreadable_note_prefixes.add(_slug_id_prefix(note_slug))
                 msg = f"Erreur pull note {note_slug}: {e}"
                 logger.error(msg)
                 report.errors.append(msg)
@@ -1191,13 +1297,25 @@ class NexaNoteSyncEngine:
             ))
             logger.info(f"  ← Importée : {remote_note.title}")
 
-        elif local_note.sync_status == SyncStatus.MODIFIED:
+        elif local_note.sync_status in (SyncStatus.MODIFIED, SyncStatus.LOCAL_ONLY):
+            # LOCAL_ONLY with a remote twin: an earlier push reached the
+            # server but the note changed (or the push failed) before it
+            # could be marked synced, so it still holds unpushed edits.
             # Conflict path — local has unsynced edits and a remote copy
             # exists. Snapshot the local version *before* resolving so its
             # edits can be preserved even when the chosen strategy would
             # overwrite them.
             local_snapshot = copy.deepcopy(local_note)
+            _carry_local_fields(remote_note, local_note)
             result = self.resolver.resolve(local_note, remote_note)
+            # The resolver stamps its winner SYNCED, but unless the winner
+            # is the remote version as-is (local edits kept in a conflict
+            # copy, if any), it holds changes the server doesn't have yet.
+            # Leave it MODIFIED so this sync's push uploads them.
+            # A deleted winner stays as resolved: push never sends deleted
+            # notes, so MODIFIED would re-run this conflict on every sync.
+            if result.winner is not remote_note and not result.winner.is_deleted:
+                result.winner.sync_status = SyncStatus.MODIFIED
 
             # A genuine conflict = both sides changed. The resolver reports
             # no conflict when the timestamps match (identical versions).
@@ -1237,6 +1355,7 @@ class NexaNoteSyncEngine:
         else:
             # Pas de modification locale — appliquer la version distante si plus récente
             if remote_note.updated_at > local_note.updated_at:
+                _carry_local_fields(remote_note, local_note)
                 self._apply_save_note(remote_note)
                 report.notes_pulled += 1
                 plan.add_pull(remote_note.id, remote_note.title)
@@ -1307,6 +1426,19 @@ class NexaNoteSyncEngine:
             report.errors.append(f"Échec partiel push : {note.title} — {msg}")
             return
 
+        if nb_slug in getattr(self, "_unreadable_notebooks", ()):
+            report.errors.append(
+                f"Échec partiel push : {note.title} — notebook {nb_slug} "
+                f"could not be listed, push skipped"
+            )
+            return
+        if note.id[:8] in getattr(self, "_unreadable_note_prefixes", ()):
+            report.errors.append(
+                f"Échec partiel push : {note.title} — remote copy could not "
+                f"be read, push skipped"
+            )
+            return
+
         # Créer le dossier carnet sur le serveur si nécessaire
         nb_entries = self.client.list_notebooks()
         nb_names = {e["name"] for e in nb_entries}
@@ -1358,9 +1490,13 @@ class NexaNoteSyncEngine:
                     page_reasons.append(page_reason)
 
         if meta_ok and pages_ok:
-            # Marquer comme SYNCED
-            note.sync_status = SyncStatus.SYNCED
-            self._apply_save_note(note, save_pages=False)
+            # Marquer comme SYNCED — unless the note was edited while it was
+            # uploading: re-saving our snapshot would revert that edit and
+            # mark it synced although the server never got it.
+            current = self.db.get_note(note.id, load_pages=False)
+            if current is not None and current.updated_at == note.updated_at:
+                current.sync_status = SyncStatus.SYNCED
+                self._apply_save_note(current, save_pages=False)
             report.notes_pushed += 1
             self._ensure_plan().add_push(note.id, note.title)
             report.events.append(SyncEvent(

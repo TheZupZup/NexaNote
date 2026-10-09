@@ -108,7 +108,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
                   'device. Connecting a server is optional and only needed to '
                   'sync across devices.',
                   style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                        color: scheme.onSurface.withOpacity(0.6),
+                        color: scheme.onSurface.withValues(alpha: 0.6),
                       ),
                 ),
                 const SizedBox(height: 24),
@@ -146,7 +146,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
                     child: Text('or connect to a server',
                         style: TextStyle(
                             fontSize: 12,
-                            color: scheme.onSurface.withOpacity(0.5))),
+                            color: scheme.onSurface.withValues(alpha: 0.5))),
                   ),
                   const Expanded(child: Divider()),
                 ]),
@@ -275,7 +275,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
                 Container(
                   padding: const EdgeInsets.all(14),
                   decoration: BoxDecoration(
-                    color: scheme.surfaceContainerHighest.withOpacity(0.5),
+                    color: scheme.surfaceContainerHighest.withValues(alpha: 0.5),
                     borderRadius: BorderRadius.circular(10),
                   ),
                   child: Column(
@@ -284,13 +284,17 @@ class _ConnectScreenState extends State<ConnectScreen> {
                       Row(children: [
                         Icon(Icons.info_outline,
                             size: 16,
-                            color: scheme.onSurface.withOpacity(0.5)),
+                            color: scheme.onSurface.withValues(alpha: 0.5)),
                         const SizedBox(width: 6),
-                        Text('How to start the server',
-                            style: TextStyle(
-                                fontWeight: FontWeight.w600,
-                                fontSize: 13,
-                                color: scheme.onSurface.withOpacity(0.7))),
+                        // Flexible so it wraps on narrow phones or with a
+                        // large system font instead of overflowing.
+                        Flexible(
+                          child: Text('How to start the server',
+                              style: TextStyle(
+                                  fontWeight: FontWeight.w600,
+                                  fontSize: 13,
+                                  color: scheme.onSurface.withValues(alpha: 0.7))),
+                        ),
                       ]),
                       const SizedBox(height: 8),
                       _code('cd ~/NexaNote'),

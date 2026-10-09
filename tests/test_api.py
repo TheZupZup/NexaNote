@@ -313,3 +313,32 @@ class TestSync:
         resp = client.get("/sync/status")
         assert resp.status_code == 200
         assert resp.json()["status"] == "never_synced"
+
+
+class TestInputValidation:
+    def test_unknown_note_type_is_rejected_with_422(self, client):
+        resp = client.post("/notes", json={"title": "x", "note_type": "drawing"})
+        assert resp.status_code == 422
+
+    def test_unknown_conflict_strategy_is_rejected_and_not_saved(self, client):
+        resp = client.post("/sync/configure", json={
+            "server_url": "http://nas.local/", "conflict_strategy": "newest",
+        })
+        assert resp.status_code == 422
+
+        ok = client.post("/sync/configure", json={
+            "server_url": "http://nas.local/", "conflict_strategy": "keep_both",
+        })
+        assert ok.status_code == 200
+
+
+class TestPageSaveReportsNoteVersion:
+    def test_text_and_ink_saves_return_the_notes_new_updated_at(self, client):
+        nid = client.post("/notes", json={"title": "x"}).json()["id"]
+
+        text = client.put(f"/notes/{nid}/pages/1/text", json={"typed_content": "a"}).json()
+        assert text["note_updated_at"] == client.get(f"/notes/{nid}").json()["updated_at"]
+
+        ink = client.put(f"/notes/{nid}/pages/1/ink", json={"strokes": []}).json()
+        assert ink["note_updated_at"] == client.get(f"/notes/{nid}").json()["updated_at"]
+        assert ink["note_updated_at"] != text["note_updated_at"]

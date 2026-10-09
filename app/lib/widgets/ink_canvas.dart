@@ -51,7 +51,7 @@ class InkStrokeData {
   Map<String, dynamic> toJson() => {
         'id': id,
         'color':
-            '#${color.value.toRadixString(16).padLeft(8, '0').substring(2)}',
+            '#${color.toARGB32().toRadixString(16).padLeft(8, '0').substring(2)}',
         'width': width,
         'tool': tool.name,
         'points': points.map((p) => p.toJson()).toList(),
@@ -118,7 +118,7 @@ class _InkPainter extends CustomPainter {
 
   void _drawTemplate(Canvas canvas, Size size) {
     final paint = Paint()
-      ..color = const Color(0xFFDDDDFF).withOpacity(0.5)
+      ..color = const Color(0xFFDDDDFF).withValues(alpha: 0.5)
       ..strokeWidth = 0.5;
 
     switch (template) {
@@ -140,7 +140,7 @@ class _InkPainter extends CustomPainter {
       case 'dotted':
         const spacing = 40.0;
         final dotPaint = Paint()
-          ..color = const Color(0xFFAAAACC).withOpacity(0.5)
+          ..color = const Color(0xFFAAAACC).withValues(alpha: 0.5)
           ..strokeWidth = 1.5
           ..strokeCap = StrokeCap.round;
         for (double y = spacing; y < size.height; y += spacing) {
@@ -178,7 +178,7 @@ class _InkPainter extends CustomPainter {
 
       final paint = Paint()
         ..color = isHighlighter
-            ? stroke.color.withOpacity(0.35)
+            ? stroke.color.withValues(alpha: 0.35)
             : stroke.color
         ..strokeWidth = w
         ..strokeCap = StrokeCap.round
@@ -254,6 +254,15 @@ class _InkCanvasState extends State<InkCanvas> {
   final List<InkStrokeData> _strokes = [];
   final List<List<InkStrokeData>> _undoStack = [];
   InkStrokeData? _currentStroke;
+
+  /// The one pointer currently drawing. Other pointers (a palm, a second
+  /// finger) must not add points to its stroke or start a new one over it.
+  int? _drawingPointer;
+  bool _drawingWithTouch = false;
+
+  /// Touch pointers currently down. Two or more is a pinch/pan gesture, not
+  /// ink, so any stroke started by the first finger is discarded.
+  final Set<int> _touchPointers = {};
 
   // Outils
   InkTool _tool = InkTool.pen;
@@ -356,6 +365,50 @@ class _InkCanvasState extends State<InkCanvas> {
     widget.onStrokesChanged([]);
   }
 
+  void _onPointerDown(PointerDownEvent e) {
+    if (e.kind == PointerDeviceKind.touch) {
+      _touchPointers.add(e.pointer);
+      if (_touchPointers.length > 1) {
+        // Second finger: this is a pinch/pan. Drop the stroke the first
+        // finger started instead of committing a zig-zag between them.
+        if (_drawingPointer != null &&
+            _touchPointers.contains(_drawingPointer)) {
+          _drawingPointer = null;
+          setState(() => _currentStroke = null);
+        }
+        return;
+      }
+    }
+    final isStylus = e.kind == PointerDeviceKind.stylus ||
+        e.kind == PointerDeviceKind.invertedStylus;
+    if (_drawingPointer != null) {
+      // A palm resting on the screen before the pen lands is not ink: the
+      // stylus takes over and the touch stroke is dropped.
+      if (!isStylus || !_drawingWithTouch) return;
+      setState(() => _currentStroke = null);
+    }
+    final drawable = switch (e.kind) {
+      PointerDeviceKind.stylus ||
+      PointerDeviceKind.invertedStylus ||
+      PointerDeviceKind.touch =>
+        true,
+      PointerDeviceKind.mouse => e.buttons == kPrimaryMouseButton,
+      _ => false,
+    };
+    if (!drawable) return;
+    _drawingPointer = e.pointer;
+    _drawingWithTouch = e.kind == PointerDeviceKind.touch;
+    final pressure = e.pressure > 0 ? e.pressure : 0.5;
+    _startStroke(_toCanvasPos(e.localPosition), pressure);
+  }
+
+  void _onPointerEnd(PointerEvent e) {
+    _touchPointers.remove(e.pointer);
+    if (e.pointer != _drawingPointer) return;
+    _drawingPointer = null;
+    _endStroke();
+  }
+
   Offset _toCanvasPos(Offset localPos) {
     return Offset(
       (localPos.dx - _offset.dx) / _scale,
@@ -388,29 +441,23 @@ class _InkCanvasState extends State<InkCanvas> {
         Expanded(
           child: ClipRect(
             child: Listener(
-              onPointerDown: (e) {
-                if (e.kind == PointerDeviceKind.stylus ||
-                    e.kind == PointerDeviceKind.invertedStylus ||
-                    e.kind == PointerDeviceKind.mouse ||
-                    e.kind == PointerDeviceKind.touch) {
-                  final pressure = e.pressure > 0 ? e.pressure : 0.5;
-                  _startStroke(_toCanvasPos(e.localPosition), pressure);
-                }
-              },
+              onPointerDown: _onPointerDown,
               onPointerMove: (e) {
-                if (_currentStroke == null) return;
+                if (e.pointer != _drawingPointer) return;
                 final pressure = e.pressure > 0 ? e.pressure : 0.5;
                 _addPoint(_toCanvasPos(e.localPosition), pressure);
               },
-              onPointerUp: (_) => _endStroke(),
-              onPointerCancel: (_) => _endStroke(),
+              onPointerUp: _onPointerEnd,
+              onPointerCancel: _onPointerEnd,
               child: GestureDetector(
                 // Zoom avec pinch
                 onScaleStart: (d) {
                   _lastFocalPoint = d.focalPoint;
                 },
                 onScaleUpdate: (d) {
-                  if (d.pointerCount == 2) {
+                  // Never zoom under a pen that is drawing (stylus + palm
+                  // also counts as two pointers).
+                  if (d.pointerCount == 2 && _drawingPointer == null) {
                     setState(() {
                       _scale = (_scale * d.scale).clamp(0.5, 5.0);
                       final delta = d.focalPoint - _lastFocalPoint;
@@ -421,8 +468,8 @@ class _InkCanvasState extends State<InkCanvas> {
                 },
                 child: Transform(
                   transform: Matrix4.identity()
-                    ..translate(_offset.dx, _offset.dy)
-                    ..scale(_scale),
+                    ..translateByDouble(_offset.dx, _offset.dy, 0, 1)
+                    ..scaleByDouble(_scale, _scale, _scale, 1),
                   child: CustomPaint(
                     painter: _InkPainter(
                       strokes: _strokes,
@@ -595,7 +642,7 @@ class _ToolBtn extends StatelessWidget {
           padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
           decoration: BoxDecoration(
             color: selected
-                ? const Color(0xFF6366F1).withOpacity(0.15)
+                ? const Color(0xFF6366F1).withValues(alpha: 0.15)
                 : Colors.transparent,
             borderRadius: BorderRadius.circular(8),
           ),
@@ -604,7 +651,7 @@ class _ToolBtn extends StatelessWidget {
             size: 20,
             color: selected
                 ? const Color(0xFF6366F1)
-                : Theme.of(context).colorScheme.onSurface.withOpacity(0.6),
+                : Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.6),
           ),
         ),
       ),

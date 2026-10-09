@@ -221,7 +221,9 @@ class PlainMarkdownNoteStore:
         for path in sorted(self.notebooks_dir.glob("*.yaml")):
             try:
                 nb = deserialize_notebook(path.read_text(encoding="utf-8"))
-            except OSError as exc:
+            except Exception as exc:
+                # One unreadable or malformed file must not hide every other
+                # notebook. The file itself is left untouched.
                 logger.warning(f"skip unreadable notebook {path}: {exc}")
                 continue
             if nb is None:
@@ -366,19 +368,21 @@ class PlainMarkdownNoteStore:
         needle = search_title.lower() if search_title else None
         for md_path in self.notes_dir.glob("*.md"):
             sidecar_path = self._sidecar_path(md_path.stem)
-            if sidecar_path.exists():
-                data = self._safe_read_sidecar(sidecar_path)
-                if data is None:
-                    continue
-                # Read the body lazily — only when required to build pages.
-                note = self._note_from_sidecar(data, md_text="")
-            else:
-                try:
+            try:
+                if sidecar_path.exists():
+                    data = self._safe_read_sidecar(sidecar_path)
+                    if data is None:
+                        continue
+                    # Read the body lazily — only when required to build pages.
+                    note = self._note_from_sidecar(data, md_text="")
+                else:
                     text = md_path.read_text(encoding="utf-8")
-                except OSError as exc:
-                    logger.warning(f"skip unreadable note {md_path}: {exc}")
-                    continue
-                note = synthesize_plain_md_note(md_path, text)
+                    note = synthesize_plain_md_note(md_path, text)
+            except Exception as exc:
+                # A malformed sidecar or non-UTF-8 file must not make the
+                # whole listing fail. The files are left untouched.
+                logger.warning(f"skip unreadable note {md_path}: {exc}")
+                continue
             note.pages = []  # listings stay metadata-only
 
             if not include_deleted and note.is_deleted:
@@ -494,7 +498,11 @@ class PlainMarkdownNoteStore:
             notebooks += 1
 
         for md_path in self.notes_dir.glob("*.md"):
-            note = self._read_note_from_stem(md_path.stem, load_pages=True)
+            try:
+                note = self._read_note_from_stem(md_path.stem, load_pages=True)
+            except Exception as exc:
+                logger.warning(f"skip unreadable note {md_path}: {exc}")
+                continue
             if note is None:
                 continue
             if note.is_deleted:
@@ -547,7 +555,11 @@ class PlainMarkdownNoteStore:
         }
 
     def _note_from_sidecar(self, sidecar: dict, md_text: str) -> Note:
-        pages_text = _split_pages_body(md_text) if md_text else {}
+        pages_text = (
+            _split_pages_body(md_text, page_count=len(sidecar.get("pages") or []))
+            if md_text
+            else {}
+        )
         pages: list[Page] = []
         for pm in sidecar.get("pages") or []:
             num = int(pm.get("page_number", 1))

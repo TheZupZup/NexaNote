@@ -58,6 +58,61 @@ class LocalNoteService {
       _repo.getNoteByRemoteId(remoteId);
   Future<void> upsertNote(Note note) => _repo.upsertNote(note);
 
+  /// Local edits. Each writes only its own column (plus the sync bookkeeping
+  /// and its part's edit revision) so concurrent title, text and ink saves
+  /// can't overwrite each other.
+  /// They return the number of rows changed (0: no such note).
+  Future<int> updateNoteTitle(String id, String title) =>
+      _repo.updateNoteFields(id, {'title': title}, NotePart.title);
+  /// [blind]: made without the note's real content at hand (local mode),
+  /// see Note.blindEdit.
+  Future<int> updateNoteContent(String id, String typedContent,
+          {bool blind = false}) =>
+      _repo.updateNoteFields(
+          id, {'typed_content': typedContent}, NotePart.text, blind);
+
+  /// Replaces the note's drawing and records it as a local edit, atomically.
+  /// Returns the new ink revision, or null when there is no such note.
+  Future<int?> recordInk(String id, List<Stroke> strokes,
+          {bool blind = false}) =>
+      _repo.recordInk(id, strokes, blind: blind);
+
+  /// The note's current drawing with the ink revision it belongs to.
+  Future<({int rev, List<Stroke> strokes})?> readInk(String id) =>
+      _repo.readInk(id);
+
+  /// The server has [part] of note [id] up to revision [rev].
+  Future<void> markPartSynced(String id, NotePart part, int rev) =>
+      _repo.markPartSynced(id, part, rev);
+
+  // Connected-mode copies of server notes.
+  Future<String?> localIdForRemote(String remoteId) =>
+      _repo.localIdForRemote(remoteId);
+  Future<String> cacheRemoteNote(Note remote, List<Stroke> strokes,
+          {bool refresh = true}) =>
+      _repo.cacheRemoteNote(remote, strokes, refresh: refresh);
+  Future<List<Note>> getNotesWithPendingEdits() =>
+      _repo.getNotesWithPendingEdits();
+  Future<void> detachFromRemote(String id) => _repo.detachFromRemote(id);
+  Future<bool> splitOffContentlessEdits(String id) =>
+      _repo.splitOffContentlessEdits(id);
+
+  // Pull bookkeeping used by SyncService.
+  Future<void> applyPulledNote(String localId, Note pulled) =>
+      _repo.applyPulledNote(localId, pulled);
+  Future<void> insertNoteIfAbsent(Note note) => _repo.insertNoteIfAbsent(note);
+  Future<void> markNoteConflict(String id) => _repo.markNoteConflict(id);
+  Future<int> hardDeleteNoteIfSynced(String id) =>
+      _repo.hardDeleteNoteIfSynced(id);
+
+  // Push bookkeeping used by SyncService.
+  Future<void> setNoteRemoteId(String id, String remoteId, String? baseline) =>
+      _repo.setNoteRemoteId(id, remoteId, baseline);
+  Future<bool> markNoteSyncedIfUnchanged(String id, DateTime seenUpdatedAt) =>
+      _repo.markNoteSyncedIfUnchanged(id, seenUpdatedAt);
+  Future<void> adoptRemoteNotebook(String localId, Notebook remote) =>
+      _repo.adoptRemoteNotebook(localId, remote);
+
   /// Soft-deletes a note (sets `is_deleted`, marks it `modified`) so the
   /// deletion can later propagate once a backend is configured. Used by the
   /// local-mode delete path; sync uses [hardDeleteNote] for server-driven

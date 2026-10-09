@@ -88,12 +88,21 @@ def _now() -> datetime:
 
 
 def _parse_dt(value) -> datetime:
-    """Parse an ISO datetime string (or pass through datetime)."""
+    """Parse an ISO datetime string (or pass through datetime).
+
+    Timestamps without a timezone (hand-edited frontmatter, YAML's
+    `2024-01-01 10:00`) are read as UTC: mixing naive and aware datetimes
+    makes comparisons and sorts raise.
+    """
     if isinstance(value, datetime):
-        return value
-    if isinstance(value, str):
-        return datetime.fromisoformat(value)
-    raise TypeError(f"cannot parse datetime from {type(value).__name__}")
+        parsed = value
+    elif isinstance(value, str):
+        parsed = datetime.fromisoformat(value)
+    else:
+        raise TypeError(f"cannot parse datetime from {type(value).__name__}")
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
 
 
 def _fmt_dt(dt: datetime) -> str:
@@ -203,15 +212,18 @@ def _join_frontmatter(meta: dict, body: str) -> str:
     return f"{FRONTMATTER_DELIM}\n{yaml_text}\n{FRONTMATTER_DELIM}\n\n{body_part}"
 
 
-def _split_pages_body(body: str) -> dict[int, str]:
+def _split_pages_body(body: str, page_count: Optional[int] = None) -> dict[int, str]:
     """
     EN: Extract per-page content from the markdown body.
         - With no markers: the entire body belongs to page 1.
         - With `<!-- nexanote:page N -->` markers: split accordingly.
+        A note whose metadata lists a single page is written without
+        markers (see `_join_pages_body`), so its body is never split: text
+        that happens to contain a marker line would otherwise be lost.
     FR: Extrait le contenu page par page depuis le corps markdown.
     """
     matches = list(PAGE_MARKER_RE.finditer(body))
-    if not matches:
+    if not matches or (page_count is not None and page_count <= 1):
         return {1: body.rstrip("\n")}
 
     pages: dict[int, str] = {}
@@ -327,8 +339,8 @@ def deserialize_note(md_text: str, drawings: Optional[dict]) -> Optional[Note]:
     if not meta or "id" not in meta:
         return None
 
-    pages_text = _split_pages_body(body)
     pages_meta = meta.get("pages") or []
+    pages_text = _split_pages_body(body, page_count=len(pages_meta))
 
     # Strokes per page_number
     strokes_by_page: dict[int, list[InkStroke]] = {}
@@ -552,7 +564,9 @@ class FileNoteStore:
         for path in sorted(self.notebooks_dir.glob("*.yaml")):
             try:
                 nb = deserialize_notebook(path.read_text(encoding="utf-8"))
-            except OSError as exc:
+            except Exception as exc:
+                # One unreadable or malformed file must not hide every other
+                # notebook. The file itself is left untouched.
                 logger.warning(f"skip unreadable notebook {path}: {exc}")
                 continue
             if nb is None:
@@ -660,14 +674,9 @@ class FileNoteStore:
         out: list[Note] = []
         needle = search_title.lower() if search_title else None
         for path in self.notes_dir.glob("*.md"):
-            try:
-                md_text = path.read_text(encoding="utf-8")
-            except OSError as exc:
-                logger.warning(f"skip unreadable note {path}: {exc}")
-                continue
-            note = deserialize_note(md_text, None)
+            note = self._read_listed_note(path)
             if note is None:
-                note = synthesize_plain_md_note(path, md_text)
+                continue
             note.pages = []  # listings are metadata-only
 
             if not include_deleted and note.is_deleted:
@@ -682,6 +691,25 @@ class FileNoteStore:
 
         out.sort(key=lambda n: n.updated_at, reverse=True)
         return out
+
+    @staticmethod
+    def _read_listed_note(path: Path) -> Optional[Note]:
+        """
+        EN: Read one note for a listing, or None (logged) if the file can't be
+            read or parsed: invalid UTF-8, malformed frontmatter, unknown
+            enum values... One bad file used to make GET /notes, /stats and
+            the sync push fail as a whole. The file itself is left untouched.
+        FR: Lit une note pour un listing ; None si le fichier est illisible.
+        """
+        try:
+            md_text = path.read_text(encoding="utf-8")
+            note = deserialize_note(md_text, None)
+            if note is None:
+                note = synthesize_plain_md_note(path, md_text)
+            return note
+        except Exception as exc:
+            logger.warning(f"skip unreadable note {path}: {exc}")
+            return None
 
     def delete_note_permanent(self, note_id: str) -> None:
         """Permanent delete (purge from trash)."""
@@ -779,13 +807,9 @@ class FileNoteStore:
             notebooks += 1
 
         for path in self.notes_dir.glob("*.md"):
-            try:
-                md_text = path.read_text(encoding="utf-8")
-            except OSError:
-                continue
-            note = deserialize_note(md_text, None)
+            note = self._read_listed_note(path)
             if note is None:
-                note = synthesize_plain_md_note(path, md_text)
+                continue
             if note.is_deleted:
                 notes_deleted += 1
                 continue
@@ -839,9 +863,17 @@ def stem_from_plain_md_id(note_id: str) -> Optional[str]:
         return None
     pad = (-len(encoded)) % 4
     try:
-        return base64.urlsafe_b64decode(encoded + "=" * pad).decode("utf-8")
+        stem = base64.urlsafe_b64decode(encoded + "=" * pad).decode("utf-8")
     except (ValueError, UnicodeDecodeError):
         return None
+    # EN: The stem is joined into notes_dir, so it must name a file in that
+    #     directory: an id built from "../../x" would otherwise let the API
+    #     read and write `.md` files anywhere on disk.
+    # FR: Le stem doit désigner un fichier de notes_dir, sinon un id forgé
+    #     ("../../x") sortirait du dossier.
+    if stem in ("", ".", "..") or any(c in stem for c in ("/", "\\", "\0")):
+        return None
+    return stem
 
 
 def synthesize_plain_md_note(path: Path, md_text: str) -> Note:

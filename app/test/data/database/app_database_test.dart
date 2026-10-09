@@ -2,6 +2,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 import 'package:nexanote/data/database/schema.dart';
+import 'package:nexanote/data/models/note.dart';
 
 void main() {
   setUpAll(() {
@@ -108,7 +109,7 @@ void main() {
 
   group('Schema.onUpgrade', () {
     test('adds remote_id/remote_path when migrating v1 → v2', () async {
-      final dbPath = inMemoryDatabasePath;
+      const dbPath = inMemoryDatabasePath;
 
       // Open at v1 with the v1 schema (no remote_id/remote_path).
       final v1 = await openDatabase(
@@ -159,8 +160,91 @@ void main() {
       expect(row['title'], 'Legacy');
       expect(row['remote_id'], isNull);
       expect(row['remote_path'], isNull);
+      expect(row['remote_baseline'], isNull);
 
       await v1.close();
+    });
+
+    test('adds remote_baseline when migrating v2 → v3, keeping pending rows',
+        () async {
+      final v2 = await openDatabase(inMemoryDatabasePath,
+          version: 1, onCreate: (db, _) => Schema.onCreate(db, 1));
+      await v2.execute('ALTER TABLE notes DROP COLUMN remote_baseline');
+      for (final column in Schema.v4Columns) {
+        await v2.execute('ALTER TABLE notes DROP COLUMN $column');
+      }
+      final now = DateTime.utc(2024, 1, 1).toIso8601String();
+      await v2.insert('notes', {
+        'id': 'pending', 'title': 'Pending', 'remote_id': 'srv-1',
+        'sync_status': 'local_only', 'created_at': now, 'updated_at': now,
+      });
+
+      await Schema.onUpgrade(v2, 2, Schema.version);
+
+      final row =
+          (await v2.query('notes', where: 'id = ?', whereArgs: ['pending']))
+              .first;
+      expect(row['remote_id'], 'srv-1');
+      // No baseline recorded by older builds: a resumed upload has no proof
+      // and keeps both versions rather than writing into the remote note.
+      expect(row['remote_baseline'], isNull);
+      await v2.close();
+    });
+
+    test(
+        'adds the edit revisions when migrating v3 → v4, keeping rows as '
+        'they were', () async {
+      final v3 = await openDatabase(inMemoryDatabasePath,
+          version: 1, onCreate: (db, _) => Schema.onCreate(db, 1));
+      for (final column in Schema.v4Columns) {
+        await v3.execute('ALTER TABLE notes DROP COLUMN $column');
+      }
+      final now = DateTime.utc(2024, 1, 1).toIso8601String();
+      Future<void> insert(String id, String? remoteId, String status) =>
+          v3.insert('notes', {
+            'id': id,
+            'title': 'Kept',
+            'typed_content': 'body',
+            'remote_id': remoteId,
+            'remote_baseline': now,
+            'sync_status': status,
+            'created_at': now,
+            'updated_at': now,
+          });
+      await insert('uploading', 'srv-1', 'local_only');
+      await insert('pulled', 'pulled', 'synced');
+      await insert('pulled-edited', 'pulled-edited', 'modified');
+      await insert('uploaded-edited', 'srv-2', 'modified');
+
+      await Schema.onUpgrade(v3, 3, Schema.version);
+
+      Future<Note> row(String id) async => Note.fromMap(
+          (await v3.query('notes', where: 'id = ?', whereArgs: [id])).first);
+      final uploading = await row('uploading');
+      expect(uploading.title, 'Kept');
+      expect(uploading.typedContent, 'body');
+      expect(uploading.syncStatus, 'local_only');
+      expect(uploading.remoteBaseline, now);
+      // What it still has to upload stays with pushLocal via local_only.
+      expect(uploading.hasPendingEdits, isFalse);
+      expect(uploading.hasContent, isTrue);
+
+      // A pulled row never had the note's text or drawing.
+      final pulled = await row('pulled');
+      expect(pulled.hasContent, isFalse);
+      expect(pulled.hasPendingEdits, isFalse);
+
+      // Local edits older builds kept as `modified` stay pending instead of
+      // being overwritten by the next refresh; on a pulled row they were
+      // made blind.
+      final pulledEdited = await row('pulled-edited');
+      expect(pulledEdited.hasPendingEdits, isTrue);
+      expect(pulledEdited.blindEdit, isTrue);
+      final uploadedEdited = await row('uploaded-edited');
+      expect(uploadedEdited.hasPendingEdits, isTrue);
+      expect(uploadedEdited.hasContent, isTrue);
+      expect(uploadedEdited.blindEdit, isFalse);
+      await v3.close();
     });
   });
 }

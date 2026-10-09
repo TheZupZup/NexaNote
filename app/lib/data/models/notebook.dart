@@ -82,6 +82,21 @@ class Notebook {
     );
   }
 
+  /// Same notebook under another primary key (used when the server assigns
+  /// its own id to a notebook created locally).
+  Notebook withId(String newId) => Notebook(
+        id: newId,
+        parentId: parentId,
+        name: name,
+        description: description,
+        color: color,
+        icon: icon,
+        isArchived: isArchived,
+        syncStatus: syncStatus,
+        createdAt: createdAt,
+        updatedAt: updatedAt,
+      );
+
   @override
   String toString() => 'Notebook(id: $id, name: $name)';
 }

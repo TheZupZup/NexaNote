@@ -36,14 +36,14 @@ class NotesList extends StatelessWidget {
                 color: Theme.of(context)
                     .colorScheme
                     .onSurface
-                    .withOpacity(0.2)),
+                    .withValues(alpha: 0.2)),
             const SizedBox(height: 12),
             Text('No notes yet',
                 style: TextStyle(
                     color: Theme.of(context)
                         .colorScheme
                         .onSurface
-                        .withOpacity(0.4))),
+                        .withValues(alpha: 0.4))),
           ],
         ),
       );
@@ -56,14 +56,14 @@ class NotesList extends StatelessWidget {
     return ListView(
       children: [
         if (pinned.isNotEmpty) ...[
-          _SectionHeader(title: 'PINNED'),
+          const _SectionHeader(title: 'PINNED'),
           ...pinned.map((n) => _NoteCard(
                 note: n,
                 isSelected: selected?.id == n.id,
                 onTap: () => onSelect(n),
                 onDelete: () => onDelete(n),
               )),
-          _SectionHeader(title: 'NOTES'),
+          const _SectionHeader(title: 'NOTES'),
         ],
         ...regular.map((n) => _NoteCard(
               note: n,
@@ -89,7 +89,7 @@ class _SectionHeader extends StatelessWidget {
         style: TextStyle(
           fontSize: 11,
           fontWeight: FontWeight.w600,
-          color: Theme.of(context).colorScheme.onSurface.withOpacity(0.4),
+          color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.4),
           letterSpacing: 0.8,
         ),
       ),
@@ -164,12 +164,12 @@ class _NoteCard extends StatelessWidget {
           margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
           decoration: BoxDecoration(
             color: isSelected
-                ? const Color(0xFF6366F1).withOpacity(0.1)
+                ? const Color(0xFF6366F1).withValues(alpha: 0.1)
                 : Colors.transparent,
             borderRadius: BorderRadius.circular(10),
             border: isSelected
                 ? Border.all(
-                    color: const Color(0xFF6366F1).withOpacity(0.3))
+                    color: const Color(0xFF6366F1).withValues(alpha: 0.3))
                 : null,
           ),
           child: Padding(
@@ -183,8 +183,8 @@ class _NoteCard extends StatelessWidget {
                   height: 32,
                   decoration: BoxDecoration(
                     color: isHandwritten
-                        ? const Color(0xFFEC4899).withOpacity(0.12)
-                        : const Color(0xFF6366F1).withOpacity(0.12),
+                        ? const Color(0xFFEC4899).withValues(alpha: 0.12)
+                        : const Color(0xFF6366F1).withValues(alpha: 0.12),
                     borderRadius: BorderRadius.circular(8),
                   ),
                   child: Icon(
@@ -228,7 +228,7 @@ class _NoteCard extends StatelessWidget {
                             _formatDate(note.updatedAt),
                             style: TextStyle(
                               fontSize: 11,
-                              color: scheme.onSurface.withOpacity(0.4),
+                              color: scheme.onSurface.withValues(alpha: 0.4),
                             ),
                           ),
                           if (note.tags.isNotEmpty) ...[
@@ -245,7 +245,7 @@ class _NoteCard extends StatelessWidget {
                                       style: TextStyle(
                                           fontSize: 10,
                                           color: scheme.onSurface
-                                              .withOpacity(0.5))),
+                                              .withValues(alpha: 0.5))),
                                 )),
                           ],
                         ],

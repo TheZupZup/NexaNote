@@ -38,9 +38,11 @@ Routes:
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import os
+import threading
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -55,6 +57,7 @@ from nexanote.models.note import (
 )
 from nexanote.storage.file_store import FileNoteStore
 from nexanote.sync.client import NexaNoteSyncEngine, SyncConfig, SyncReport
+from nexanote.sync.conflict import ConflictStrategy
 
 logger = logging.getLogger("nexanote.api")
 
@@ -86,11 +89,15 @@ class PageSchema(BaseModel):
     typed_content: str = ""
     strokes: list[StrokeSchema] = Field(default_factory=list)
     updated_at: Optional[str] = None
+    # The note's updated_at right after a page save, so a client resuming an
+    # interrupted upload can tell its own writes from someone else's.
+    note_updated_at: Optional[str] = None
 
 
 class NoteCreateSchema(BaseModel):
     title: str = "Sans titre"
-    note_type: str = "typed"
+    # Typed so an unknown value is a 422, not a 500 from NoteType(...).
+    note_type: NoteType = NoteType.TYPED
     notebook_id: Optional[str] = None
     tags: list[str] = Field(default_factory=list)
     template: str = "blank"
@@ -159,7 +166,9 @@ class SyncConfigSchema(BaseModel):
     server_url: str
     username: str = "nexanote"
     password: str = "nexanote"
-    conflict_strategy: str = "merge_strokes"
+    # Typed so a bad value is rejected up front instead of being saved and
+    # making every later /sync/trigger fail.
+    conflict_strategy: ConflictStrategy = ConflictStrategy.MERGE_STROKES
 
 
 class SyncReportSchema(BaseModel):
@@ -235,8 +244,9 @@ def _note_to_schema(note: Note, include_pages: bool = False) -> NoteSchema:
     )
 
 
-def _page_to_schema(page: Page) -> PageSchema:
+def _page_to_schema(page: Page, note: Optional[Note] = None) -> PageSchema:
     return PageSchema(
+        note_updated_at=note.updated_at.isoformat() if note else None,
         page_number=page.page_number,
         template=page.template,
         width_px=page.width_px,
@@ -292,6 +302,24 @@ def create_app(db: FileNoteStore) -> FastAPI:
     # FR: Champs de sync non-sensibles sûrs à écrire sur disque.
     #     Le mot de passe est exclu intentionnellement — jamais écrit en clair.
     _PERSIST_FIELDS = {"server_url", "username", "conflict_strategy"}
+
+    # EN: Write routes read the whole note, change one part and save it back.
+    #     FastAPI runs them on a thread pool, so the app's text and ink
+    #     autosaves for one note can overlap and each would write back the
+    #     other's stale copy. One lock per note serialises them.
+    # FR: Un verrou par note pour que les sauvegardes texte/encre
+    #     concurrentes ne s'écrasent pas.
+    _note_locks: dict[str, threading.Lock] = {}
+    _note_locks_guard = threading.Lock()
+
+    def _locked_by_note(route):
+        @functools.wraps(route)
+        def wrapper(note_id: str, *args, **kwargs):
+            with _note_locks_guard:
+                lock = _note_locks.setdefault(note_id, threading.Lock())
+            with lock:
+                return route(note_id, *args, **kwargs)
+        return wrapper
 
     _last_sync_report: dict = {}
     _sync_config: dict = {}
@@ -435,6 +463,7 @@ def create_app(db: FileNoteStore) -> FastAPI:
         return _note_to_schema(note, include_pages=pages)
 
     @app.put("/notes/{note_id}", response_model=NoteSchema)
+    @_locked_by_note
     def update_note(note_id: str, data: NoteUpdateSchema):
         note = db.get_note(note_id, load_pages=False)
         if not note:
@@ -452,6 +481,7 @@ def create_app(db: FileNoteStore) -> FastAPI:
         return _note_to_schema(note)
 
     @app.delete("/notes/{note_id}", status_code=204)
+    @_locked_by_note
     def delete_note(note_id: str):
         note = db.get_note(note_id, load_pages=False)
         if not note:
@@ -460,6 +490,7 @@ def create_app(db: FileNoteStore) -> FastAPI:
         db.save_note(note, save_pages=False)
 
     @app.post("/notes/{note_id}/restore", response_model=NoteSchema)
+    @_locked_by_note
     def restore_note(note_id: str):
         note = db.get_note(note_id, load_pages=False)
         if not note:
@@ -505,6 +536,7 @@ def create_app(db: FileNoteStore) -> FastAPI:
         return _page_to_schema(page)
 
     @app.put("/notes/{note_id}/pages/{page_num}/ink", response_model=PageSchema)
+    @_locked_by_note
     def update_ink(note_id: str, page_num: int, data: InkUpdateSchema):
         """Remplace tous les strokes d'une page — appelé après chaque session d'écriture."""
         note = db.get_note(note_id, load_pages=True)
@@ -534,9 +566,10 @@ def create_app(db: FileNoteStore) -> FastAPI:
         note.touch()
         db.save_page(page)
         db.save_note(note, save_pages=False)
-        return _page_to_schema(page)
+        return _page_to_schema(page, note)
 
     @app.put("/notes/{note_id}/pages/{page_num}/text", response_model=PageSchema)
+    @_locked_by_note
     def update_text(note_id: str, page_num: int, data: TextUpdateSchema):
         """Met à jour le contenu texte/markdown d'une page."""
         note = db.get_note(note_id, load_pages=True)
@@ -551,7 +584,7 @@ def create_app(db: FileNoteStore) -> FastAPI:
         note.touch()
         db.save_page(page)
         db.save_note(note, save_pages=False)
-        return _page_to_schema(page)
+        return _page_to_schema(page, note)
 
     # ------------------------------------------------------------------
     # Sync
@@ -565,7 +598,7 @@ def create_app(db: FileNoteStore) -> FastAPI:
         FR: Sauvegarde les paramètres WebDAV en mémoire et persiste les champs
             sûrs sur disque. Le mot de passe reste en mémoire uniquement.
         """
-        _sync_config.update(config.model_dump())
+        _sync_config.update(config.model_dump(mode="json"))
         _save_sync_config_to_disk()
         return {"status": "configured", "server_url": config.server_url}
 
